@@ -1,4 +1,4 @@
-import { EventContractError } from "./errors.ts";
+import { EventContractError, PermissionError } from "./errors.ts";
 import { logger } from "./logger.ts";
 
 type EventHandler = (payload: unknown) => void;
@@ -28,6 +28,14 @@ type BackpressureConfig = {
 type EventBusConfig = {
   enableSchemaValidation: boolean;
   backpressure: BackpressureConfig;
+};
+
+type PermissionChecker = {
+  assert: (
+    source: string,
+    perm: "event.emit_reserved" | "schema.register",
+    context: { action: string; eventName?: string; target?: string }
+  ) => void;
 };
 
 type QueueItem = {
@@ -68,6 +76,7 @@ export class EventBus {
   private emitTimestampsBySource = new Map<string, number[]>();
   private schemas = new Map<string, SchemaValidator>();
   private config: EventBusConfig;
+  private permissionChecker?: PermissionChecker;
   private queue: QueueItem[] = [];
   private batching = new Map<string, QueueItem[]>();
   private batchingTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -82,6 +91,10 @@ export class EventBus {
         ...(config?.backpressure ?? {}),
       },
     };
+  }
+
+  setPermissionChecker(checker: PermissionChecker): void {
+    this.permissionChecker = checker;
   }
 
   emit(name: string, payload: unknown, meta?: { source: string }): void {
@@ -178,12 +191,28 @@ export class EventBus {
     return [...this.events];
   }
 
-  registerSchema(key: string, validator: SchemaValidator): void {
+  registerSchema(
+    key: string,
+    validator: SchemaValidator,
+    meta?: { source: string }
+  ): void {
     if (!key) {
       throw new EventContractError("EventBus.registerSchema requires a key.");
     }
     if (!validator) {
       throw new EventContractError("EventBus.registerSchema requires a validator.");
+    }
+    const source = meta?.source ?? "kernel";
+    if (source !== "kernel") {
+      if (!this.permissionChecker) {
+        throw new PermissionError(
+          `Permission denied: "${source}" missing "schema.register".`
+        );
+      }
+      this.permissionChecker.assert(source, "schema.register", {
+        action: "schema.register",
+        target: key,
+      });
     }
     this.schemas.set(key, validator);
   }
@@ -253,9 +282,20 @@ export class EventBus {
   private assertNamespaceAllowed(name: string, source: string): void {
     if (RESERVED_PREFIXES.some((prefix) => name.startsWith(prefix))) {
       if (source !== "kernel") {
-        throw new EventContractError(
-          `EventBus event "${name}" is reserved for kernel source.`
-        );
+        if (name.startsWith("kernel:")) {
+          throw new EventContractError(
+            `EventBus event "${name}" is reserved for kernel source.`
+          );
+        }
+        if (!this.permissionChecker) {
+          throw new PermissionError(
+            `Permission denied: "${source}" missing "event.emit_reserved".`
+          );
+        }
+        this.permissionChecker.assert(source, "event.emit_reserved", {
+          action: "event.emit_reserved",
+          eventName: name,
+        });
       }
     }
   }

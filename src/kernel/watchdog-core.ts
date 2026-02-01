@@ -118,7 +118,7 @@ export class WatchdogCore {
     }
     if (policy === "CONTAIN") {
       try {
-        this.moduleLoader.stop(moduleId, `watchdog:${reason}`);
+        this.moduleLoader.stop(moduleId, `watchdog:${reason}`, { source: "kernel" });
         this.eventBus.emit(
           "diagnostic:watchdog_contain",
           { moduleId, reason },
@@ -139,7 +139,7 @@ export class WatchdogCore {
     }
     if (policy === "ISOLATE") {
       try {
-        this.moduleLoader.isolate(moduleId, `watchdog:${reason}`);
+        this.moduleLoader.isolate(moduleId, `watchdog:${reason}`, { source: "kernel" });
         this.eventBus.emit(
           "diagnostic:watchdog_isolate",
           { moduleId, reason },

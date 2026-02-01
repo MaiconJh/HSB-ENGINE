@@ -1,6 +1,7 @@
 import { EventBus } from "./event-bus.ts";
 import { ModuleLifecycleError } from "./errors.ts";
 import { logger } from "./logger.ts";
+import { PermissionSystem } from "./permission-system.ts";
 
 export type ModuleContext = {
   moduleName: string;
@@ -27,6 +28,7 @@ export class ModuleLoader {
   private modules = new Map<string, KernelModule>();
   private states = new Map<string, ModuleState>();
   private eventBus: EventBus;
+  private permissionSystem: PermissionSystem;
   private resources = new Map<
     string,
     {
@@ -38,8 +40,9 @@ export class ModuleLoader {
     }
   >();
 
-  constructor(eventBus: EventBus) {
+  constructor(eventBus: EventBus, permissionSystem: PermissionSystem) {
     this.eventBus = eventBus;
+    this.permissionSystem = permissionSystem;
   }
 
   register(module: KernelModule): void {
@@ -129,10 +132,17 @@ export class ModuleLoader {
     this.eventBus.emit("kernel:module.started", { name }, { source: "kernel" });
   }
 
-  stop(name: string, reason = "stop"): void {
+  stop(name: string, reason = "stop", meta?: { source: string }): void {
     const module = this.modules.get(name);
     if (!module) {
       throw new ModuleLifecycleError(`ModuleLoader.stop unknown module "${name}".`);
+    }
+    const source = meta?.source ?? "kernel";
+    if (source !== "kernel" && source !== name) {
+      this.permissionSystem.assert(source, "kernel.control", {
+        action: "kernel.control",
+        target: name,
+      });
     }
     const state = this.states.get(name);
     if (state !== "running") {
@@ -170,10 +180,17 @@ export class ModuleLoader {
     this.eventBus.emit("kernel:module.stopped", { name }, { source: "kernel" });
   }
 
-  isolate(name: string, reason = "isolate"): void {
+  isolate(name: string, reason = "isolate", meta?: { source: string }): void {
     const state = this.states.get(name);
     if (!state) {
       throw new ModuleLifecycleError(`ModuleLoader.isolate unknown module "${name}".`);
+    }
+    const source = meta?.source ?? "kernel";
+    if (source !== "kernel" && source !== name) {
+      this.permissionSystem.assert(source, "kernel.control", {
+        action: "kernel.control",
+        target: name,
+      });
     }
     if (state === "isolated") {
       throw new ModuleLifecycleError(
@@ -188,10 +205,17 @@ export class ModuleLoader {
     this.eventBus.emit("kernel:module.isolated", { name }, { source: "kernel" });
   }
 
-  reset(name: string, reason = "reset"): void {
+  reset(name: string, reason = "reset", meta?: { source: string }): void {
     const state = this.states.get(name);
     if (!state) {
       throw new ModuleLifecycleError(`ModuleLoader.reset unknown module "${name}".`);
+    }
+    const source = meta?.source ?? "kernel";
+    if (source !== "kernel" && source !== name) {
+      this.permissionSystem.assert(source, "kernel.control", {
+        action: "kernel.control",
+        target: name,
+      });
     }
     if (state !== "isolated" && state !== "error") {
       throw new ModuleLifecycleError(

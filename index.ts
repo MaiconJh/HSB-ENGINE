@@ -1,11 +1,14 @@
 import { EventBus } from "./src/kernel/event-bus.ts";
 import { CacheStore } from "./src/kernel/cache-store.ts";
 import { ModuleLoader } from "./src/kernel/module-loader.ts";
+import { PermissionSystem } from "./src/kernel/permission-system.ts";
 import { WatchdogCore } from "./src/kernel/watchdog-core.ts";
 import { dummyModule } from "./src/modules/dummy-module.ts";
 
 const eventBus = new EventBus();
-const moduleLoader = new ModuleLoader(eventBus);
+const permissionSystem = new PermissionSystem(eventBus);
+eventBus.setPermissionChecker(permissionSystem);
+const moduleLoader = new ModuleLoader(eventBus, permissionSystem);
 const watchdog = new WatchdogCore(eventBus, moduleLoader, {
   defaultPolicy: "WARN",
 });
@@ -35,10 +38,10 @@ moduleLoader.stop(dummyModule.name);
 
 console.log("[Kernel] Event history", eventBus.history());
 
-const cacheStore = new CacheStore();
+const cacheStore = new CacheStore(permissionSystem);
 cacheStore
-  .set("boot", { ok: true })
-  .then(() => cacheStore.get("boot"))
+  .set("boot", { ok: true }, { source: "kernel" })
+  .then(() => cacheStore.get("boot", { source: "kernel" }))
   .then((value) => {
     console.log("[Kernel] CacheStore value", value);
   })

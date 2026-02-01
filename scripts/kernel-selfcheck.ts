@@ -1,12 +1,14 @@
 import { CacheStore } from "../src/kernel/cache-store.ts";
 import { EventBus } from "../src/kernel/event-bus.ts";
 import { ModuleLoader } from "../src/kernel/module-loader.ts";
+import { PermissionSystem } from "../src/kernel/permission-system.ts";
 import { WatchdogCore } from "../src/kernel/watchdog-core.ts";
 import { dummyModule } from "../src/modules/dummy-module.ts";
 import type { ModuleContext } from "../src/kernel/module-loader.ts";
 import {
   EventContractError,
   ModuleLifecycleError,
+  PermissionError,
 } from "../src/kernel/errors.ts";
 
 type Assertion = {
@@ -16,6 +18,7 @@ type Assertion = {
 };
 
 const assertions: Assertion[] = [];
+const pendingChecks: Promise<void>[] = [];
 
 const assertThrows = (name: string, fn: () => void, errorType: Function) => {
   try {
@@ -38,8 +41,29 @@ const assertTrue = (name: string, condition: boolean, message?: string) => {
   assertions.push({ name, passed: condition, message });
 };
 
+const assertRejects = (name: string, promise: Promise<unknown>, errorType: Function) => {
+  const check = promise
+    .then(() => {
+      assertions.push({ name, passed: false, message: "Expected rejection not thrown." });
+    })
+    .catch((error) => {
+      if (error instanceof errorType) {
+        assertions.push({ name, passed: true });
+        return;
+      }
+      assertions.push({
+        name,
+        passed: false,
+        message: `Wrong error type: ${error instanceof Error ? error.name : "unknown"}`,
+      });
+    });
+  pendingChecks.push(check);
+};
+
 const eventBus = new EventBus();
-const moduleLoader = new ModuleLoader(eventBus);
+const permissionSystem = new PermissionSystem(eventBus);
+eventBus.setPermissionChecker(permissionSystem);
+const moduleLoader = new ModuleLoader(eventBus, permissionSystem);
 const watchdog = new WatchdogCore(eventBus, moduleLoader, {
   defaultPolicy: "WARN",
   modulePolicies: {
@@ -194,6 +218,8 @@ assertThrows(
 );
 
 const schemaBus = new EventBus({ enableSchemaValidation: true });
+const schemaPermissions = new PermissionSystem(schemaBus);
+schemaBus.setPermissionChecker(schemaPermissions);
 schemaBus.registerSchema("schema:event", (payload) => ({
   ok: typeof (payload as { ok?: boolean }).ok === "boolean",
   error: "ok must be boolean",
@@ -219,6 +245,8 @@ const backpressureBus = new EventBus({
     maxBatchSize: 2,
   },
 });
+const backpressurePermissions = new PermissionSystem(backpressureBus);
+backpressureBus.setPermissionChecker(backpressurePermissions);
 
 backpressureBus.emit("bp.event", { id: 1 }, { source: "kernel" });
 backpressureBus.emit("bp.event", { id: 2 }, { source: "kernel" });
@@ -233,11 +261,15 @@ const batchedBus = new EventBus({
     maxBatchSize: 200,
   },
 });
+const batchedPermissions = new PermissionSystem(batchedBus);
+batchedBus.setPermissionChecker(batchedPermissions);
 for (let i = 0; i < 200; i += 1) {
   batchedBus.emitBatched("batch.event", { index: i }, { source: "batcher" });
 }
 
 const unsubscribeBus = new EventBus();
+const unsubscribePermissions = new PermissionSystem(unsubscribeBus);
+unsubscribeBus.setPermissionChecker(unsubscribePermissions);
 const unsubscribe = unsubscribeBus.listen(
   "idempotent.event",
   () => undefined,
@@ -246,6 +278,86 @@ const unsubscribe = unsubscribeBus.listen(
 unsubscribe();
 unsubscribe();
 assertTrue("unsubscribe idempotent", true);
+
+const permissionBus = new EventBus();
+const permissionSystemLocal = new PermissionSystem(permissionBus);
+permissionBus.setPermissionChecker(permissionSystemLocal);
+
+assertThrows(
+  "reserved event blocked without permission",
+  () => permissionBus.emit("system:notice", { ok: true }, { source: "module-a" }),
+  PermissionError
+);
+permissionSystemLocal.grant("module-a", ["event.emit_reserved"]);
+permissionBus.emit("system:notice", { ok: true }, { source: "module-a" });
+assertThrows(
+  "kernel prefix blocked even with reserved permission",
+  () => permissionBus.emit("kernel:notice", { ok: true }, { source: "module-a" }),
+  EventContractError
+);
+
+const controlBus = new EventBus();
+const controlPermissions = new PermissionSystem(controlBus);
+controlBus.setPermissionChecker(controlPermissions);
+const controlLoader = new ModuleLoader(controlBus, controlPermissions);
+controlLoader.register(dummyModule);
+controlLoader.start(dummyModule.name);
+assertThrows(
+  "kernel control blocked without permission",
+  () => controlLoader.stop(dummyModule.name, "test", { source: "module-a" }),
+  PermissionError
+);
+controlPermissions.grant("module-a", ["kernel.control"]);
+controlLoader.stop(dummyModule.name, "test", { source: "module-a" });
+
+const cacheBus = new EventBus();
+const cachePermissions = new PermissionSystem(cacheBus);
+cacheBus.setPermissionChecker(cachePermissions);
+const cacheStore = new CacheStore(cachePermissions);
+assertRejects(
+  "storage write blocked without permission",
+  cacheStore.set("denied", { ok: false }, { source: "module-a" }),
+  PermissionError
+);
+cachePermissions.grant("module-a", ["storage.write", "storage.read"]);
+pendingChecks.push(
+  cacheStore.set("allowed", { ok: true }, { source: "module-a" }).then(() => {
+    assertions.push({ name: "storage write allowed", passed: true });
+  })
+);
+pendingChecks.push(
+  cacheStore.get("allowed", { source: "module-a" }).then((value) => {
+    assertions.push({
+      name: "storage read allowed",
+      passed: (value as { ok?: boolean })?.ok === true,
+    });
+  })
+);
+
+const schemaPermissionBus = new EventBus();
+const schemaPermissionSystem = new PermissionSystem(schemaPermissionBus);
+schemaPermissionBus.setPermissionChecker(schemaPermissionSystem);
+assertThrows(
+  "schema registration blocked without permission",
+  () =>
+    schemaPermissionBus.registerSchema(
+      "module:schema",
+      () => ({ ok: true }),
+      { source: "module-a" }
+    ),
+  PermissionError
+);
+schemaPermissionSystem.grant("module-a", ["schema.register"]);
+schemaPermissionBus.registerSchema(
+  "module:schema",
+  () => ({ ok: true }),
+  { source: "module-a" }
+);
+
+const permissionDiagnostics = permissionBus
+  .history()
+  .filter((entry) => entry.name === "diagnostic:permission_violation");
+assertTrue("permission violation diagnostics recorded", permissionDiagnostics.length > 0);
 
 setTimeout(() => {
   const backpressureDiagnostics = backpressureBus
@@ -263,22 +375,23 @@ setTimeout(() => {
     Array.isArray(batchPayload) && batchPayload.length === 200
   );
 
-  const cacheStore = new CacheStore();
-  cacheStore
-    .set("selfcheck", { ok: true })
-    .then(() => cacheStore.get("selfcheck"))
-    .then((value) => {
-      assertTrue("cache store async get/set works", (value as { ok?: boolean })?.ok === true);
-      finalize();
-    })
-    .catch((error) => {
-      assertions.push({
-        name: "cache store async get/set works",
-        passed: false,
-        message: String(error),
-      });
-      finalize();
-    });
+  const cacheStore = new CacheStore(permissionSystem);
+  pendingChecks.push(
+    cacheStore
+      .set("selfcheck", { ok: true }, { source: "kernel" })
+      .then(() => cacheStore.get("selfcheck", { source: "kernel" }))
+      .then((value) => {
+        assertTrue("cache store async get/set works", (value as { ok?: boolean })?.ok === true);
+      })
+      .catch((error) => {
+        assertions.push({
+          name: "cache store async get/set works",
+          passed: false,
+          message: String(error),
+        });
+      })
+  );
+  Promise.all(pendingChecks).then(() => finalize());
 }, 20);
 
 const finalize = () => {
