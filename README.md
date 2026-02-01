@@ -1,24 +1,12 @@
 # HSB-ENGINE
 
-Deterministic, modular engine scaffold focused on reality-first documentation and clear separation between core runtime, modules, and UI surfaces.
+HSB Engine is a deterministic modular execution platform. It executes isolated modules, orchestrates independent processes, persists real data, and observes runtime behavior with auditable signals.
 
-## Principles
-- **Reality-first docs**: If documentation and runtime disagree, the runtime is wrong and must be corrected.
-- **Deterministic execution**: No nondeterminism in runtime flows.
-- **No AI in runtime**: Intelligence tools live outside the core runtime.
-- **No mock data**: Documentation and tests reflect real behavior.
-- **Modular extensibility**: Extend via modules without modifying core.
-- **UI separation**: UI surfaces do not leak into kernel concerns.
+## What This Solves
+The engine provides a stable, domain-neutral core that can expand indefinitely through modules, schemas, manifests, and interfaces without modifying the kernel.
 
-## Repository Map
-- `src/kernel/`: Core runtime boundaries and contracts.
-- `src/modules/`: Pluggable modules that extend behavior.
-- `src/pages/`: UI page-level surfaces.
-- `src/components/`: Reusable UI primitives.
-- `src/styles/`: Style foundations.
-- `src/types/`: Shared type definitions.
-- `docs/`: Architecture, decisions, and developer documentation.
-- `scripts/`: Audits and developer utilities.
+## Documentation
+The authoritative documentation lives in `docs/` and is split into scoped, atomic files. Start with `docs/README.md` to follow the intended reading order.
 
 ## Status
-Scaffold only. No runtime logic has been implemented yet.
+This repository contains a minimal kernel seed for lifecycle and event flow validation. No UI, plugins, or host integrations are implemented yet.
