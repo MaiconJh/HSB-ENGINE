@@ -1,0 +1,213 @@
+import { CacheStore } from "../src/kernel/cache-store.ts";
+import { EventBus } from "../src/kernel/event-bus.ts";
+import { ModuleLoader } from "../src/kernel/module-loader.ts";
+import { WatchdogCore } from "../src/kernel/watchdog-core.ts";
+import { dummyModule } from "../src/modules/dummy-module.ts";
+import type { ModuleContext } from "../src/kernel/module-loader.ts";
+import {
+  EventContractError,
+  ModuleLifecycleError,
+} from "../src/kernel/errors.ts";
+
+type Assertion = {
+  name: string;
+  passed: boolean;
+  message?: string;
+};
+
+const assertions: Assertion[] = [];
+
+const assertThrows = (name: string, fn: () => void, errorType: Function) => {
+  try {
+    fn();
+    assertions.push({ name, passed: false, message: "Expected error not thrown." });
+  } catch (error) {
+    if (error instanceof errorType) {
+      assertions.push({ name, passed: true });
+      return;
+    }
+    assertions.push({
+      name,
+      passed: false,
+      message: `Wrong error type: ${error instanceof Error ? error.name : "unknown"}`,
+    });
+  }
+};
+
+const assertTrue = (name: string, condition: boolean, message?: string) => {
+  assertions.push({ name, passed: condition, message });
+};
+
+const eventBus = new EventBus();
+const moduleLoader = new ModuleLoader(eventBus);
+const watchdog = new WatchdogCore(eventBus, moduleLoader, {
+  defaultPolicy: "WARN",
+  modulePolicies: {
+    "stormy-module": "CONTAIN",
+  },
+});
+watchdog.start();
+
+assertThrows(
+  "start before register throws",
+  () => moduleLoader.start("missing-module"),
+  ModuleLifecycleError
+);
+
+moduleLoader.register(dummyModule);
+
+assertThrows(
+  "double register throws",
+  () => moduleLoader.register(dummyModule),
+  ModuleLifecycleError
+);
+
+moduleLoader.start(dummyModule.name);
+
+assertThrows(
+  "double start throws",
+  () => moduleLoader.start(dummyModule.name),
+  ModuleLifecycleError
+);
+
+eventBus.emit("kernel.tick", { ok: true }, { source: "kernel" });
+
+assertThrows(
+  "reserved namespace from module is blocked",
+  () => eventBus.emit("kernel:forbidden", {}, { source: "dummy-module" }),
+  EventContractError
+);
+
+assertThrows(
+  "invalid event name blocked",
+  () => eventBus.emit("Invalid Name", {}, { source: "kernel" }),
+  EventContractError
+);
+
+moduleLoader.stop(dummyModule.name);
+
+assertThrows(
+  "stop twice throws",
+  () => moduleLoader.stop(dummyModule.name),
+  ModuleLifecycleError
+);
+
+const leakyModule = {
+  name: "leaky-module",
+  start: (context: ModuleContext) => {
+    context.listen("leaky.event", () => undefined);
+    context.setInterval(() => undefined, 1000);
+    context.onDispose(() => {
+      throw new Error("dispose failure");
+    });
+  },
+  stop: () => {
+    // Intentionally missing cleanup.
+  },
+};
+
+moduleLoader.register(leakyModule);
+moduleLoader.start(leakyModule.name);
+moduleLoader.stop(leakyModule.name);
+
+const teardownDiagnostics = eventBus
+  .history()
+  .filter((entry) => entry.name === "diagnostic:teardown_cleanup");
+assertTrue(
+  "teardown cleanup emitted",
+  teardownDiagnostics.some((entry) => (entry.payload as { moduleId?: string }).moduleId === "leaky-module")
+);
+
+const disposeDiagnostics = eventBus
+  .history()
+  .filter((entry) => entry.name === "diagnostic:dispose_error");
+assertTrue(
+  "dispose error recorded",
+  disposeDiagnostics.some((entry) => (entry.payload as { moduleId?: string }).moduleId === "leaky-module")
+);
+
+const stormyModule = {
+  name: "stormy-module",
+  start: (context: ModuleContext) => {
+    for (let i = 0; i < 61; i += 1) {
+      context.emit("stormy.signal", { count: i });
+    }
+  },
+  stop: () => undefined,
+};
+
+moduleLoader.register(stormyModule);
+moduleLoader.start(stormyModule.name);
+
+const stormState = moduleLoader.getState(stormyModule.name);
+assertTrue("watchdog containment stops module", stormState === "stopped");
+
+const schemaBus = new EventBus({ enableSchemaValidation: true });
+schemaBus.registerSchema("schema:event", (payload) => ({
+  ok: typeof (payload as { ok?: boolean }).ok === "boolean",
+  error: "ok must be boolean",
+}));
+
+assertThrows(
+  "schema violation throws",
+  () => schemaBus.emit("schema:event", { ok: "nope" }, { source: "kernel" }),
+  EventContractError
+);
+
+const schemaDiagnostics = schemaBus
+  .history()
+  .filter((entry) => entry.name === "diagnostic:schema_violation");
+assertTrue("schema diagnostic recorded", schemaDiagnostics.length > 0);
+
+const backpressureBus = new EventBus({
+  backpressure: {
+    enabled: true,
+    maxQueueSize: 1,
+    dropStrategy: "DROP_NEWEST",
+    batchingWindowMs: 10,
+    maxBatchSize: 2,
+  },
+});
+
+backpressureBus.emit("bp.event", { id: 1 }, { source: "kernel" });
+backpressureBus.emit("bp.event", { id: 2 }, { source: "kernel" });
+backpressureBus.emit("bp.event", { id: 3 }, { source: "kernel" });
+
+setTimeout(() => {
+  const backpressureDiagnostics = backpressureBus
+    .history()
+    .filter((entry) => entry.name === "diagnostic:backpressure_overflow");
+  assertTrue("backpressure overflow recorded", backpressureDiagnostics.length > 0);
+
+  const cacheStore = new CacheStore();
+  cacheStore
+    .set("selfcheck", { ok: true })
+    .then(() => cacheStore.get("selfcheck"))
+    .then((value) => {
+      assertTrue("cache store async get/set works", (value as { ok?: boolean })?.ok === true);
+      finalize();
+    })
+    .catch((error) => {
+      assertions.push({
+        name: "cache store async get/set works",
+        passed: false,
+        message: String(error),
+      });
+      finalize();
+    });
+}, 20);
+
+const finalize = () => {
+  const failures = assertions.filter((assertion) => !assertion.passed);
+  assertTrue("history not empty", eventBus.history().length > 0, "No events recorded.");
+
+  if (failures.length > 0) {
+    console.error("Kernel self-check failed:");
+    for (const failure of failures) {
+      console.error(`- ${failure.name}: ${failure.message ?? "failed"}`);
+    }
+    process.exitCode = 1;
+  } else {
+    console.log("Kernel self-check passed.");
+  }
+};
