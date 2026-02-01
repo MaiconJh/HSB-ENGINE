@@ -100,6 +100,14 @@ export class WatchdogCore {
   private applyPolicy(moduleId: string, reason: string, payload: unknown): void {
     const policy = this.config.modulePolicies?.[moduleId] ?? this.config.defaultPolicy;
     logger.warn("Watchdog policy evaluation", { moduleId, policy, reason });
+    if (moduleId === "kernel") {
+      this.eventBus.emit(
+        "diagnostic:watchdog_warning",
+        { moduleId, reason: "kernel_protected", payload: { reason, payload } },
+        { source: "kernel" }
+      );
+      return;
+    }
     if (policy === "WARN") {
       this.eventBus.emit(
         "diagnostic:watchdog_warning",

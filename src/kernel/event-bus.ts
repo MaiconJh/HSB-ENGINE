@@ -70,6 +70,7 @@ export class EventBus {
   private config: EventBusConfig;
   private queue: QueueItem[] = [];
   private batching = new Map<string, QueueItem[]>();
+  private batchingTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private flushScheduled = false;
 
   constructor(config?: Partial<EventBusConfig>) {
@@ -151,9 +152,11 @@ export class EventBus {
       const existing = this.handlers.get(name);
       const metaRecord = this.listenerMeta.get(handler);
       if (!existing || !existing.has(handler) || !metaRecord) {
-        throw new EventContractError(
-          `EventBus.listen cleanup failed for "${name}" (source "${source}").`
-        );
+        this.emitDiagnostic("diagnostic:listener_double_cleanup", {
+          name,
+          source,
+        });
+        return;
       }
       existing.delete(handler);
       if (existing.size === 0) {
@@ -166,7 +169,7 @@ export class EventBus {
       } else {
         this.listenerCountBySource.set(source, updatedSourceCount);
       }
-      this.totalListeners -= 1;
+      this.totalListeners = Math.max(0, this.totalListeners - 1);
       logger.info("Listener removed", { name, source });
     };
   }
@@ -214,21 +217,26 @@ export class EventBus {
     queue.push({ name, payload, source });
     this.batching.set(key, queue);
 
-    const windowMs = meta.windowMs ?? this.config.backpressure.batchingWindowMs;
-    setTimeout(() => {
-      const batch = this.batching.get(key);
-      if (!batch || batch.length === 0) {
-        return;
-      }
-      const combined = batch.map((entry) => entry.payload);
-      this.batching.delete(key);
-      this.enqueue({
-        name,
-        payload: combined,
-        source,
-      });
-      this.scheduleFlush();
-    }, windowMs);
+    if (!this.batchingTimers.has(key)) {
+      const windowMs = meta.windowMs ?? this.config.backpressure.batchingWindowMs;
+      const timer = setTimeout(() => {
+        const batch = this.batching.get(key);
+        if (!batch || batch.length === 0) {
+          this.batchingTimers.delete(key);
+          return;
+        }
+        const combined = batch.map((entry) => entry.payload);
+        this.batching.delete(key);
+        this.batchingTimers.delete(key);
+        this.enqueue({
+          name,
+          payload: combined,
+          source,
+        });
+        this.scheduleFlush();
+      }, windowMs);
+      this.batchingTimers.set(key, timer);
+    }
   }
 
   private assertValidName(name: string): void {
@@ -284,7 +292,7 @@ export class EventBus {
     }
   }
 
-  private detectStorm(): void {
+  private detectStorm(source: string): boolean {
     const now = Date.now();
     this.emitTimestamps.push(now);
     while (
@@ -297,11 +305,16 @@ export class EventBus {
       this.emitDiagnostic("diagnostic:event_storm", {
         count: this.emitTimestamps.length,
         windowMs: STORM_WINDOW_MS,
+        source,
       });
-      throw new EventContractError(
-        `EventBus storm detected: ${this.emitTimestamps.length} emits in ${STORM_WINDOW_MS}ms.`
-      );
+      if (source === "kernel") {
+        throw new EventContractError(
+          `EventBus storm detected: ${this.emitTimestamps.length} emits in ${STORM_WINDOW_MS}ms.`
+        );
+      }
+      return true;
     }
+    return false;
   }
 
   private detectSourceStorm(source: string): void {
@@ -401,7 +414,10 @@ export class EventBus {
   }
 
   private deliver(item: QueueItem): void {
-    this.detectStorm();
+    const storm = this.detectStorm(item.source);
+    if (storm && item.source !== "kernel") {
+      return;
+    }
     this.detectSourceStorm(item.source);
 
     const record: EventRecord = {
