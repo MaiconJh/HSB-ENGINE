@@ -1,26 +1,35 @@
-import { KernelModule, ModuleContext } from "../kernel/module-loader";
+import type { KernelModule, ModuleContext } from "../kernel/module-loader.ts";
+import { KernelInvariantError } from "../kernel/errors.ts";
+import { logger } from "../kernel/logger.ts";
+
+type DummyState = {
+  unsubscribe?: () => void;
+};
+
+const state = new Map<string, DummyState>();
 
 export const dummyModule: KernelModule = {
   name: "dummy-module",
   start: (context: ModuleContext) => {
-    console.log('[DummyModule] start');
-    const unsubscribe = context.eventBus.listen("kernel.tick", (payload) => {
-      console.log("[DummyModule] observed kernel.tick", payload);
+    logger.info("Dummy module start", { module: context.moduleName });
+    const unsubscribe = context.listen("kernel.tick", (payload) => {
+      logger.info("Dummy module observed kernel.tick", {
+        module: context.moduleName,
+        payload,
+      });
     });
 
-    context.eventBus.emit("dummy.started", { ok: true });
-    (context as ModuleContext & { _dummyUnsubscribe?: () => void })._dummyUnsubscribe =
-      unsubscribe;
+    context.emit("dummy.started", { ok: true });
+    state.set(context.moduleName, { unsubscribe });
   },
   stop: (context: ModuleContext) => {
-    console.log('[DummyModule] stop');
-    const unsubscribe = (context as ModuleContext & {
-      _dummyUnsubscribe?: () => void;
-    })._dummyUnsubscribe;
-    if (!unsubscribe) {
-      throw new Error("DummyModule.stop missing unsubscribe handler.");
+    logger.info("Dummy module stop", { module: context.moduleName });
+    const existing = state.get(context.moduleName);
+    if (!existing?.unsubscribe) {
+      throw new KernelInvariantError("DummyModule.stop missing unsubscribe handler.");
     }
-    unsubscribe();
-    context.eventBus.emit("dummy.stopped", { ok: true });
+    existing.unsubscribe();
+    context.emit("dummy.stopped", { ok: true });
+    state.delete(context.moduleName);
   },
 };

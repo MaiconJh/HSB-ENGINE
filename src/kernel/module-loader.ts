@@ -1,7 +1,11 @@
-import { EventBus } from "./event-bus";
+import { EventBus } from "./event-bus.ts";
+import { ModuleLifecycleError } from "./errors.ts";
+import { logger } from "./logger.ts";
 
 export type ModuleContext = {
-  eventBus: EventBus;
+  moduleName: string;
+  emit: (name: string, payload: unknown) => void;
+  listen: (name: string, handler: (payload: unknown) => void) => () => void;
 };
 
 export type KernelModule = {
@@ -10,50 +14,92 @@ export type KernelModule = {
   stop: (context: ModuleContext) => void;
 };
 
+type ModuleState = "registered" | "running" | "stopped";
+
+const NAME_PATTERN = /^[a-z0-9_.:-]+$/;
+
 export class ModuleLoader {
   private modules = new Map<string, KernelModule>();
-  private running = new Set<string>();
+  private states = new Map<string, ModuleState>();
+  private eventBus: EventBus;
 
-  constructor(private readonly context: ModuleContext) {}
+  constructor(eventBus: EventBus) {
+    this.eventBus = eventBus;
+  }
 
   register(module: KernelModule): void {
     if (!module?.name) {
-      throw new Error("ModuleLoader.register requires a module name.");
+      throw new ModuleLifecycleError("ModuleLoader.register requires a module name.");
+    }
+    if (!NAME_PATTERN.test(module.name)) {
+      throw new ModuleLifecycleError(
+        `ModuleLoader.register invalid module name "${module.name}".`
+      );
     }
     if (this.modules.has(module.name)) {
-      throw new Error(`ModuleLoader.register duplicate module "${module.name}".`);
+      throw new ModuleLifecycleError(
+        `ModuleLoader.register duplicate module "${module.name}".`
+      );
     }
     this.modules.set(module.name, module);
-    console.log(`[ModuleLoader] registered "${module.name}"`);
+    this.states.set(module.name, "registered");
+    logger.info("Module registered", { name: module.name });
   }
 
   start(name: string): void {
     const module = this.modules.get(name);
     if (!module) {
-      throw new Error(`ModuleLoader.start unknown module "${name}".`);
+      throw new ModuleLifecycleError(`ModuleLoader.start unknown module "${name}".`);
     }
-    if (this.running.has(name)) {
-      throw new Error(`ModuleLoader.start module "${name}" already running.`);
+    const state = this.states.get(name);
+    if (state === "running") {
+      throw new ModuleLifecycleError(
+        `ModuleLoader.start module "${name}" already running.`
+      );
+    }
+    if (state !== "registered") {
+      throw new ModuleLifecycleError(
+        `ModuleLoader.start module "${name}" not in registered state.`
+      );
     }
 
-    module.start(this.context);
-    this.running.add(name);
-    console.log(`[ModuleLoader] started "${name}"`);
-    this.context.eventBus.emit("module.started", { name });
+    const context: ModuleContext = {
+      moduleName: name,
+      emit: (eventName: string, payload: unknown) =>
+        this.eventBus.emit(eventName, payload, { source: name }),
+      listen: (eventName: string, handler: (payload: unknown) => void) =>
+        this.eventBus.listen(eventName, handler, { source: name }),
+    };
+
+    module.start(context);
+    this.states.set(name, "running");
+    logger.info("Module started", { name });
+    this.eventBus.emit("kernel:module.started", { name }, { source: "kernel" });
   }
 
   stop(name: string): void {
     const module = this.modules.get(name);
     if (!module) {
-      throw new Error(`ModuleLoader.stop unknown module "${name}".`);
+      throw new ModuleLifecycleError(`ModuleLoader.stop unknown module "${name}".`);
     }
-    if (!this.running.has(name)) {
-      throw new Error(`ModuleLoader.stop module "${name}" is not running.`);
+    const state = this.states.get(name);
+    if (state !== "running") {
+      throw new ModuleLifecycleError(
+        `ModuleLoader.stop module "${name}" is not running.`
+      );
     }
 
-    module.stop(this.context);
-    this.running.delete(name);
-    console.log(`[ModuleLoader] stopped "${name}"`);
-    this.context.eventBus.emit("module.stopped", { name });
+    const context: ModuleContext = {
+      moduleName: name,
+      emit: (eventName: string, payload: unknown) =>
+        this.eventBus.emit(eventName, payload, { source: name }),
+      listen: (eventName: string, handler: (payload: unknown) => void) =>
+        this.eventBus.listen(eventName, handler, { source: name }),
+    };
+
+    module.stop(context);
+    this.states.set(name, "stopped");
+    logger.info("Module stopped", { name });
+    this.eventBus.emit("kernel:module.stopped", { name }, { source: "kernel" });
   }
 }
