@@ -9,4 +9,4 @@ The engine provides a stable, domain-neutral core that can expand indefinitely t
 The authoritative documentation lives in `docs/` and is split into scoped, atomic files. Start with `docs/README.md` to follow the intended reading order.
 
 ## Status
-This repository contains documentation and scaffolding only. No runtime logic is implemented here.
+This repository contains a minimal kernel seed for lifecycle and event flow validation. No UI, plugins, or host integrations are implemented yet.
