@@ -39,3 +39,10 @@ export class SchemaContractError extends Error {
     this.name = "SchemaContractError";
   }
 }
+
+export class KernelBridgeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "KernelBridgeError";
+  }
+}

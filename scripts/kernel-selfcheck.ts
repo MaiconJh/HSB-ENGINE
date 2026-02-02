@@ -1,5 +1,7 @@
 import { CacheStore } from "../src/kernel/cache-store.ts";
 import { EventBus } from "../src/kernel/event-bus.ts";
+import { KernelBridge } from "../src/kernel/kernel-bridge.ts";
+import type { KernelCommandName } from "../src/kernel/kernel-bridge.ts";
 import { ModuleLoader } from "../src/kernel/module-loader.ts";
 import { PermissionSystem } from "../src/kernel/permission-system.ts";
 import { SchemaRegistry } from "../src/kernel/schema-registry.ts";
@@ -10,6 +12,7 @@ import type { ModuleDefinition } from "../src/kernel/manifest.ts";
 import type { ModuleContext } from "../src/kernel/module-loader.ts";
 import {
   EventContractError,
+  KernelBridgeError,
   ManifestError,
   ModuleLifecycleError,
   PermissionError,
@@ -588,6 +591,86 @@ pendingChecks.push(
     assertTrue("snapshot includes cache size", cacheSnapshot.cache?.size === 1);
     assertTrue("snapshot omits cache values", !cacheJson.includes("top-secret"));
   })
+);
+
+const bridgeBus = new EventBus();
+const bridgePermissions = new PermissionSystem(bridgeBus);
+bridgeBus.setPermissionChecker(bridgePermissions);
+const bridgeRegistry = new SchemaRegistry(bridgeBus, bridgePermissions);
+const bridgeLoader = new ModuleLoader(bridgeBus, bridgePermissions, bridgeRegistry);
+const bridgeCache = new CacheStore(bridgePermissions);
+const bridgeSnapshotter = new KernelSnapshotter({
+  eventBus: bridgeBus,
+  moduleLoader: bridgeLoader,
+  schemaRegistry: bridgeRegistry,
+});
+const bridge = new KernelBridge({
+  eventBus: bridgeBus,
+  moduleLoader: bridgeLoader,
+  cacheStore: bridgeCache,
+  schemaRegistry: bridgeRegistry,
+  snapshotter: bridgeSnapshotter,
+});
+
+const bridgeSnapshot = bridge.dispatch("kernel.snapshot.get", {}, { source: "kernel" });
+assertTrue("bridge snapshot JSON safe", JSON.stringify(bridgeSnapshot).length > 0);
+
+bridgeLoader.register(dummyModule);
+bridgeLoader.start(dummyModule.name);
+assertThrows(
+  "bridge module.stop enforces permission",
+  () => bridge.dispatch("module.stop", { id: dummyModule.name }, { source: "module-a" }),
+  PermissionError
+);
+bridge.dispatch("module.stop", { id: dummyModule.name }, { source: "kernel" });
+
+assertThrows(
+  "bridge event.emit blocks kernel namespace",
+  () =>
+    bridge.dispatch(
+      "event.emit",
+      { name: "kernel:forbidden", payload: {} },
+      { source: "module-a" }
+    ),
+  EventContractError
+);
+assertThrows(
+  "bridge event.emit blocks reserved without permission",
+  () =>
+    bridge.dispatch(
+      "event.emit",
+      { name: "system:forbidden", payload: {} },
+      { source: "module-a" }
+    ),
+  PermissionError
+);
+
+assertRejects(
+  "bridge cache.set enforces permission",
+  bridge.dispatch("cache.set", { key: "bridge-denied", value: "nope" }, { source: "module-a" }) as Promise<unknown>,
+  PermissionError
+);
+pendingChecks.push(
+  (bridge.dispatch(
+    "cache.set",
+    { key: "bridge-ok", value: "allowed" },
+    { source: "kernel" }
+  ) as Promise<unknown>)
+    .then(() =>
+      bridge.dispatch("cache.get", { key: "bridge-ok" }, { source: "kernel" })
+    )
+    .then((result) => {
+      assertTrue(
+        "bridge cache.get returns value",
+        (result as { value?: string }).value === "allowed"
+      );
+    })
+);
+
+assertThrows(
+  "bridge unknown command throws",
+  () => bridge.dispatch("unknown.command" as KernelCommandName, {}, { source: "kernel" }),
+  KernelBridgeError
 );
 
 const spamBus = new EventBus();

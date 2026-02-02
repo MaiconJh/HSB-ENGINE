@@ -1,5 +1,6 @@
 import { EventBus } from "./src/kernel/event-bus.ts";
 import { CacheStore } from "./src/kernel/cache-store.ts";
+import { KernelBridge } from "./src/kernel/kernel-bridge.ts";
 import { ModuleLoader } from "./src/kernel/module-loader.ts";
 import type { ModuleDefinition } from "./src/kernel/manifest.ts";
 import { PermissionSystem } from "./src/kernel/permission-system.ts";
@@ -69,6 +70,17 @@ const snapshotter = new KernelSnapshotter({
   cacheStore,
 });
 console.log("[Kernel] Snapshot", snapshotter.snapshot());
+const bridge = new KernelBridge({
+  eventBus,
+  moduleLoader,
+  cacheStore,
+  schemaRegistry,
+  snapshotter,
+});
+console.log(
+  "[Kernel] Bridge snapshot",
+  bridge.dispatch("kernel.snapshot.get", {}, { source: "kernel" })
+);
 cacheStore
   .set("boot", { ok: true }, { source: "kernel" })
   .then(() => cacheStore.get("boot", { source: "kernel" }))
