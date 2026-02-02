@@ -359,6 +359,46 @@ const permissionDiagnostics = permissionBus
   .filter((entry) => entry.name === "diagnostic:permission_violation");
 assertTrue("permission violation diagnostics recorded", permissionDiagnostics.length > 0);
 
+const spamBus = new EventBus();
+const spamPermissions = new PermissionSystem(spamBus);
+spamBus.setPermissionChecker(spamPermissions);
+const spamLoader = new ModuleLoader(spamBus, spamPermissions);
+const spamModule = {
+  name: "spam-module",
+  start: (context: ModuleContext) => {
+    for (let i = 0; i < 200; i += 1) {
+      try {
+        context.emit("system:forbidden", { index: i });
+      } catch (error) {
+        if (!(error instanceof PermissionError)) {
+          throw error;
+        }
+      }
+    }
+  },
+  stop: () => undefined,
+};
+spamLoader.register(spamModule);
+let spamStormThrew = false;
+try {
+  spamLoader.start(spamModule.name);
+} catch (error) {
+  if (error instanceof EventContractError) {
+    spamStormThrew = true;
+  } else {
+    throw error;
+  }
+}
+assertTrue("permission spam does not crash kernel", spamStormThrew === false);
+const spamDiagnostics = spamBus
+  .history()
+  .filter((entry) => entry.name === "diagnostic:permission_violation");
+assertTrue(
+  "permission spam diagnostics bounded",
+  spamDiagnostics.length > 0 && spamDiagnostics.length <= 5,
+  `Expected bounded permission diagnostics, got ${spamDiagnostics.length}.`
+);
+
 setTimeout(() => {
   const backpressureDiagnostics = backpressureBus
     .history()
