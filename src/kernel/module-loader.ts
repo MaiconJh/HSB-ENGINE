@@ -1,7 +1,10 @@
 import { EventBus } from "./event-bus.ts";
-import { ModuleLifecycleError } from "./errors.ts";
+import { ManifestError, ModuleLifecycleError } from "./errors.ts";
 import { logger } from "./logger.ts";
+import type { ModuleDefinition, ModuleManifest } from "./manifest.ts";
+import { validateManifest } from "./manifest.ts";
 import { PermissionSystem } from "./permission-system.ts";
+import { SchemaRegistry } from "./schema-registry.ts";
 
 export type ModuleContext = {
   moduleName: string;
@@ -27,8 +30,10 @@ export class ModuleLoader {
   // Invariant: No module-owned resources survive stop/reload.
   private modules = new Map<string, KernelModule>();
   private states = new Map<string, ModuleState>();
+  private manifests = new Map<string, ModuleManifest>();
   private eventBus: EventBus;
   private permissionSystem: PermissionSystem;
+  private schemaRegistry: SchemaRegistry;
   private resources = new Map<
     string,
     {
@@ -40,35 +45,26 @@ export class ModuleLoader {
     }
   >();
 
-  constructor(eventBus: EventBus, permissionSystem: PermissionSystem) {
+  constructor(
+    eventBus: EventBus,
+    permissionSystem: PermissionSystem,
+    schemaRegistry?: SchemaRegistry
+  ) {
     this.eventBus = eventBus;
     this.permissionSystem = permissionSystem;
+    this.schemaRegistry = schemaRegistry ?? new SchemaRegistry(eventBus, permissionSystem);
   }
 
-  register(module: KernelModule): void {
-    if (!module?.name) {
-      throw new ModuleLifecycleError("ModuleLoader.register requires a module name.");
+  register(module: KernelModule | ModuleDefinition): void {
+    if (this.isModuleDefinition(module)) {
+      this.registerDefinition(module);
+      return;
     }
-    if (!NAME_PATTERN.test(module.name)) {
-      throw new ModuleLifecycleError(
-        `ModuleLoader.register invalid module name "${module.name}".`
-      );
-    }
-    if (this.modules.has(module.name)) {
-      throw new ModuleLifecycleError(
-        `ModuleLoader.register duplicate module "${module.name}".`
-      );
-    }
-    this.modules.set(module.name, module);
-    this.states.set(module.name, "registered");
-    this.resources.set(module.name, {
-      listeners: [],
-      timers: new Set(),
-      intervals: new Set(),
-      disposers: [],
-      trackedTasks: new Map(),
-    });
-    logger.info("Module registered", { name: module.name });
+    this.registerLegacy(module);
+  }
+
+  getManifest(moduleId: string): ModuleManifest | undefined {
+    return this.manifests.get(moduleId);
   }
 
   start(name: string): void {
@@ -229,6 +225,89 @@ export class ModuleLoader {
 
   getState(name: string): ModuleState | undefined {
     return this.states.get(name);
+  }
+
+  snapshot(): Array<{
+    id: string;
+    state: ModuleState;
+    manifest?: {
+      id: string;
+      version: string;
+      permissionsCount: number;
+      schemasCount: number;
+    };
+  }> {
+    return Array.from(this.modules.keys()).map((moduleId) => {
+      const manifest = this.manifests.get(moduleId);
+      return {
+        id: moduleId,
+        state: this.states.get(moduleId) ?? "registered",
+        manifest: manifest
+          ? {
+              id: manifest.id,
+              version: manifest.version,
+              permissionsCount: manifest.permissions.length,
+              schemasCount: manifest.schemas?.length ?? 0,
+            }
+          : undefined,
+      };
+    });
+  }
+
+  private registerDefinition(definition: ModuleDefinition): void {
+    if (!definition?.manifest || !definition?.module) {
+      throw new ManifestError("Module definition requires manifest and module.");
+    }
+    validateManifest(definition.manifest, this.eventBus);
+    const normalizedModule: KernelModule =
+      definition.module.name === definition.manifest.id
+        ? definition.module
+        : { ...definition.module, name: definition.manifest.id };
+    this.registerLegacy(normalizedModule);
+    this.permissionSystem.grant(definition.manifest.id, definition.manifest.permissions);
+    this.schemaRegistry.registerDeclarations(
+      definition.manifest.id,
+      definition.manifest.schemas ?? []
+    );
+    this.manifests.set(definition.manifest.id, definition.manifest);
+  }
+
+  private registerLegacy(module: KernelModule): void {
+    if (!module?.name) {
+      throw new ModuleLifecycleError("ModuleLoader.register requires a module name.");
+    }
+    if (!NAME_PATTERN.test(module.name)) {
+      throw new ModuleLifecycleError(
+        `ModuleLoader.register invalid module name "${module.name}".`
+      );
+    }
+    if (this.modules.has(module.name)) {
+      throw new ModuleLifecycleError(
+        `ModuleLoader.register duplicate module "${module.name}".`
+      );
+    }
+    this.modules.set(module.name, module);
+    this.states.set(module.name, "registered");
+    this.resources.set(module.name, {
+      listeners: [],
+      timers: new Set(),
+      intervals: new Set(),
+      disposers: [],
+      trackedTasks: new Map(),
+    });
+    logger.info("Module registered", { name: module.name });
+  }
+
+  private isModuleDefinition(
+    candidate: KernelModule | ModuleDefinition
+  ): candidate is ModuleDefinition {
+    return (
+      typeof candidate === "object" &&
+      candidate !== null &&
+      "manifest" in candidate &&
+      "module" in candidate &&
+      typeof (candidate as ModuleDefinition).module?.start === "function"
+    );
   }
 
   private createContext(name: string): ModuleContext {
