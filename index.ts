@@ -3,13 +3,15 @@ import { CacheStore } from "./src/kernel/cache-store.ts";
 import { ModuleLoader } from "./src/kernel/module-loader.ts";
 import type { ModuleDefinition } from "./src/kernel/manifest.ts";
 import { PermissionSystem } from "./src/kernel/permission-system.ts";
+import { SchemaRegistry } from "./src/kernel/schema-registry.ts";
 import { WatchdogCore } from "./src/kernel/watchdog-core.ts";
 import { dummyModule } from "./src/modules/dummy-module.ts";
 
 const eventBus = new EventBus();
 const permissionSystem = new PermissionSystem(eventBus);
+const schemaRegistry = new SchemaRegistry(eventBus, permissionSystem);
 eventBus.setPermissionChecker(permissionSystem);
-const moduleLoader = new ModuleLoader(eventBus, permissionSystem);
+const moduleLoader = new ModuleLoader(eventBus, permissionSystem, schemaRegistry);
 const watchdog = new WatchdogCore(eventBus, moduleLoader, {
   defaultPolicy: "WARN",
 });

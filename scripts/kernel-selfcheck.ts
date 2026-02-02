@@ -2,6 +2,7 @@ import { CacheStore } from "../src/kernel/cache-store.ts";
 import { EventBus } from "../src/kernel/event-bus.ts";
 import { ModuleLoader } from "../src/kernel/module-loader.ts";
 import { PermissionSystem } from "../src/kernel/permission-system.ts";
+import { SchemaRegistry } from "../src/kernel/schema-registry.ts";
 import { WatchdogCore } from "../src/kernel/watchdog-core.ts";
 import { dummyModule } from "../src/modules/dummy-module.ts";
 import type { ModuleDefinition } from "../src/kernel/manifest.ts";
@@ -11,6 +12,7 @@ import {
   ManifestError,
   ModuleLifecycleError,
   PermissionError,
+  SchemaContractError,
 } from "../src/kernel/errors.ts";
 
 type Assertion = {
@@ -65,7 +67,8 @@ const assertRejects = (name: string, promise: Promise<unknown>, errorType: Funct
 const eventBus = new EventBus();
 const permissionSystem = new PermissionSystem(eventBus);
 eventBus.setPermissionChecker(permissionSystem);
-const moduleLoader = new ModuleLoader(eventBus, permissionSystem);
+const schemaRegistry = new SchemaRegistry(eventBus, permissionSystem);
+const moduleLoader = new ModuleLoader(eventBus, permissionSystem, schemaRegistry);
 const watchdog = new WatchdogCore(eventBus, moduleLoader, {
   defaultPolicy: "WARN",
   modulePolicies: {
@@ -364,12 +367,18 @@ assertTrue("permission violation diagnostics recorded", permissionDiagnostics.le
 const manifestBus = new EventBus();
 const manifestPermissions = new PermissionSystem(manifestBus);
 manifestBus.setPermissionChecker(manifestPermissions);
-const manifestLoader = new ModuleLoader(manifestBus, manifestPermissions);
+const manifestRegistry = new SchemaRegistry(manifestBus, manifestPermissions);
+const manifestLoader = new ModuleLoader(
+  manifestBus,
+  manifestPermissions,
+  manifestRegistry
+);
 const permModuleDefinition: ModuleDefinition = {
   manifest: {
     id: "perm-module",
     version: "1.0.0",
     permissions: ["event.emit_reserved"],
+    schemas: [{ key: "declared:event", description: "Declared schema event" }],
   },
   module: {
     name: "perm-module",
@@ -388,6 +397,13 @@ try {
   permModuleStarted = false;
 }
 assertTrue("manifest permissions grant reserved emit", permModuleStarted);
+const manifestSnapshot = manifestRegistry.snapshot();
+assertTrue(
+  "manifest schema declarations registered",
+  manifestSnapshot.keys.some(
+    (entry) => entry.key === "declared:event" && entry.owner === "perm-module"
+  )
+);
 
 const invalidManifestDefinition: ModuleDefinition = {
   manifest: {
@@ -410,6 +426,95 @@ const manifestDiagnostics = manifestBus
   .history()
   .filter((entry) => entry.name === "diagnostic:manifest_invalid");
 assertTrue("manifest invalid diagnostic recorded", manifestDiagnostics.length > 0);
+
+assertThrows(
+  "binding undeclared schema rejected",
+  () =>
+    manifestRegistry.bindValidator(
+      "undeclared:event",
+      () => ({ ok: true }),
+      { source: "kernel" }
+    ),
+  SchemaContractError
+);
+const undeclaredDiagnostics = manifestBus
+  .history()
+  .filter((entry) => entry.name === "diagnostic:schema_undeclared");
+assertTrue("schema undeclared diagnostic recorded", undeclaredDiagnostics.length > 0);
+
+const schemaValidationBus = new EventBus({ enableSchemaValidation: true });
+const schemaValidationPermissions = new PermissionSystem(schemaValidationBus);
+schemaValidationBus.setPermissionChecker(schemaValidationPermissions);
+const schemaValidationRegistry = new SchemaRegistry(
+  schemaValidationBus,
+  schemaValidationPermissions
+);
+const schemaValidationLoader = new ModuleLoader(
+  schemaValidationBus,
+  schemaValidationPermissions,
+  schemaValidationRegistry
+);
+schemaValidationLoader.register({
+  manifest: {
+    id: "schema-module",
+    version: "1.0.0",
+    permissions: [],
+    schemas: [{ key: "schema:checked" }],
+  },
+  module: {
+    name: "schema-module",
+    start: () => undefined,
+    stop: () => undefined,
+  },
+});
+schemaValidationRegistry.bindValidator(
+  "schema:checked",
+  (payload) => ({
+    ok: typeof (payload as { ok?: boolean }).ok === "boolean",
+    error: "ok must be boolean",
+  }),
+  { source: "kernel" }
+);
+assertThrows(
+  "schema validator enforcement works",
+  () => schemaValidationBus.emit("schema:checked", { ok: "nope" }, { source: "kernel" }),
+  EventContractError
+);
+const schemaValidationDiagnostics = schemaValidationBus
+  .history()
+  .filter((entry) => entry.name === "diagnostic:schema_violation");
+assertTrue(
+  "schema validator enforcement diagnostic recorded",
+  schemaValidationDiagnostics.length > 0
+);
+
+const permissionValidationBus = new EventBus();
+const permissionValidationPermissions = new PermissionSystem(permissionValidationBus);
+permissionValidationBus.setPermissionChecker(permissionValidationPermissions);
+const permissionValidationRegistry = new SchemaRegistry(
+  permissionValidationBus,
+  permissionValidationPermissions
+);
+permissionValidationRegistry.registerDeclarations("owner-module", [
+  { key: "schema:bound" },
+]);
+assertThrows(
+  "schema validator binding requires permission",
+  () =>
+    permissionValidationRegistry.bindValidator(
+      "schema:bound",
+      () => ({ ok: true }),
+      { source: "module-a" }
+    ),
+  PermissionError
+);
+const permissionBindingDiagnostics = permissionValidationBus
+  .history()
+  .filter((entry) => entry.name === "diagnostic:permission_violation");
+assertTrue(
+  "schema validator permission violation diagnostic recorded",
+  permissionBindingDiagnostics.length > 0
+);
 
 const spamBus = new EventBus();
 const spamPermissions = new PermissionSystem(spamBus);

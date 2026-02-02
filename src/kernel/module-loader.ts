@@ -4,6 +4,7 @@ import { logger } from "./logger.ts";
 import type { ModuleDefinition, ModuleManifest } from "./manifest.ts";
 import { validateManifest } from "./manifest.ts";
 import { PermissionSystem } from "./permission-system.ts";
+import { SchemaRegistry } from "./schema-registry.ts";
 
 export type ModuleContext = {
   moduleName: string;
@@ -32,6 +33,7 @@ export class ModuleLoader {
   private manifests = new Map<string, ModuleManifest>();
   private eventBus: EventBus;
   private permissionSystem: PermissionSystem;
+  private schemaRegistry: SchemaRegistry;
   private resources = new Map<
     string,
     {
@@ -43,9 +45,14 @@ export class ModuleLoader {
     }
   >();
 
-  constructor(eventBus: EventBus, permissionSystem: PermissionSystem) {
+  constructor(
+    eventBus: EventBus,
+    permissionSystem: PermissionSystem,
+    schemaRegistry?: SchemaRegistry
+  ) {
     this.eventBus = eventBus;
     this.permissionSystem = permissionSystem;
+    this.schemaRegistry = schemaRegistry ?? new SchemaRegistry(eventBus, permissionSystem);
   }
 
   register(module: KernelModule | ModuleDefinition): void {
@@ -231,6 +238,10 @@ export class ModuleLoader {
         : { ...definition.module, name: definition.manifest.id };
     this.registerLegacy(normalizedModule);
     this.permissionSystem.grant(definition.manifest.id, definition.manifest.permissions);
+    this.schemaRegistry.registerDeclarations(
+      definition.manifest.id,
+      definition.manifest.schemas ?? []
+    );
     this.manifests.set(definition.manifest.id, definition.manifest);
   }
 
