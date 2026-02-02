@@ -25,3 +25,31 @@ export class PermissionError extends Error {
     this.name = "PermissionError";
   }
 }
+
+export class ManifestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ManifestError";
+  }
+}
+
+export class SchemaContractError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SchemaContractError";
+  }
+}
+
+export class KernelBridgeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "KernelBridgeError";
+  }
+}
+
+export class CacheError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CacheError";
+  }
+}

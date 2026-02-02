@@ -1,14 +1,30 @@
 import { CacheStore } from "../src/kernel/cache-store.ts";
 import { EventBus } from "../src/kernel/event-bus.ts";
+import { MemoryHost } from "../src/host/memory-host.ts";
+import { NodeHost } from "../src/host/node-host.ts";
+import { KernelBridge } from "../src/kernel/kernel-bridge.ts";
+import type { KernelCommandName } from "../src/kernel/kernel-bridge.ts";
+import { LocalKernelTransport } from "../src/kernel/kernel-transport.ts";
+import { UnifiedKernelTransport } from "../src/kernel/unified-transport.ts";
 import { ModuleLoader } from "../src/kernel/module-loader.ts";
 import { PermissionSystem } from "../src/kernel/permission-system.ts";
+import { SchemaRegistry } from "../src/kernel/schema-registry.ts";
+import { KernelSnapshotter } from "../src/kernel/snapshot.ts";
 import { WatchdogCore } from "../src/kernel/watchdog-core.ts";
 import { dummyModule } from "../src/modules/dummy-module.ts";
+import type { ModuleDefinition } from "../src/kernel/manifest.ts";
 import type { ModuleContext } from "../src/kernel/module-loader.ts";
+import { mkdir, writeFile, mkdtemp } from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
 import {
   EventContractError,
+  CacheError,
+  KernelBridgeError,
+  ManifestError,
   ModuleLifecycleError,
   PermissionError,
+  SchemaContractError,
 } from "../src/kernel/errors.ts";
 
 type Assertion = {
@@ -63,7 +79,8 @@ const assertRejects = (name: string, promise: Promise<unknown>, errorType: Funct
 const eventBus = new EventBus();
 const permissionSystem = new PermissionSystem(eventBus);
 eventBus.setPermissionChecker(permissionSystem);
-const moduleLoader = new ModuleLoader(eventBus, permissionSystem);
+const schemaRegistry = new SchemaRegistry(eventBus, permissionSystem);
+const moduleLoader = new ModuleLoader(eventBus, permissionSystem, schemaRegistry);
 const watchdog = new WatchdogCore(eventBus, moduleLoader, {
   defaultPolicy: "WARN",
   modulePolicies: {
@@ -358,6 +375,470 @@ const permissionDiagnostics = permissionBus
   .history()
   .filter((entry) => entry.name === "diagnostic:permission_violation");
 assertTrue("permission violation diagnostics recorded", permissionDiagnostics.length > 0);
+
+const manifestBus = new EventBus();
+const manifestPermissions = new PermissionSystem(manifestBus);
+manifestBus.setPermissionChecker(manifestPermissions);
+const manifestRegistry = new SchemaRegistry(manifestBus, manifestPermissions);
+const manifestLoader = new ModuleLoader(
+  manifestBus,
+  manifestPermissions,
+  manifestRegistry
+);
+const permModuleDefinition: ModuleDefinition = {
+  manifest: {
+    id: "perm-module",
+    version: "1.0.0",
+    permissions: ["event.emit_reserved"],
+    schemas: [{ key: "declared:event", description: "Declared schema event" }],
+  },
+  module: {
+    name: "perm-module",
+    start: (context: ModuleContext) => {
+      context.emit("system:test", { ok: true });
+    },
+    stop: () => undefined,
+  },
+};
+manifestLoader.register(permModuleDefinition);
+let permModuleStarted = false;
+try {
+  manifestLoader.start("perm-module");
+  permModuleStarted = true;
+} catch {
+  permModuleStarted = false;
+}
+assertTrue("manifest permissions grant reserved emit", permModuleStarted);
+const manifestSnapshot = manifestRegistry.snapshot();
+assertTrue(
+  "manifest schema declarations registered",
+  manifestSnapshot.keys.some(
+    (entry) => entry.key === "declared:event" && entry.owner === "perm-module"
+  )
+);
+
+const invalidManifestDefinition: ModuleDefinition = {
+  manifest: {
+    id: "",
+    version: "1.0.0",
+    permissions: [],
+  },
+  module: {
+    name: "invalid-manifest",
+    start: () => undefined,
+    stop: () => undefined,
+  },
+};
+assertThrows(
+  "invalid manifest rejected",
+  () => manifestLoader.register(invalidManifestDefinition),
+  ManifestError
+);
+const manifestDiagnostics = manifestBus
+  .history()
+  .filter((entry) => entry.name === "diagnostic:manifest_invalid");
+assertTrue("manifest invalid diagnostic recorded", manifestDiagnostics.length > 0);
+
+assertThrows(
+  "binding undeclared schema rejected",
+  () =>
+    manifestRegistry.bindValidator(
+      "undeclared:event",
+      () => ({ ok: true }),
+      { source: "kernel" }
+    ),
+  SchemaContractError
+);
+const undeclaredDiagnostics = manifestBus
+  .history()
+  .filter((entry) => entry.name === "diagnostic:schema_undeclared");
+assertTrue("schema undeclared diagnostic recorded", undeclaredDiagnostics.length > 0);
+
+const schemaValidationBus = new EventBus({ enableSchemaValidation: true });
+const schemaValidationPermissions = new PermissionSystem(schemaValidationBus);
+schemaValidationBus.setPermissionChecker(schemaValidationPermissions);
+const schemaValidationRegistry = new SchemaRegistry(
+  schemaValidationBus,
+  schemaValidationPermissions
+);
+const schemaValidationLoader = new ModuleLoader(
+  schemaValidationBus,
+  schemaValidationPermissions,
+  schemaValidationRegistry
+);
+schemaValidationLoader.register({
+  manifest: {
+    id: "schema-module",
+    version: "1.0.0",
+    permissions: [],
+    schemas: [{ key: "schema:checked" }],
+  },
+  module: {
+    name: "schema-module",
+    start: () => undefined,
+    stop: () => undefined,
+  },
+});
+schemaValidationRegistry.bindValidator(
+  "schema:checked",
+  (payload) => ({
+    ok: typeof (payload as { ok?: boolean }).ok === "boolean",
+    error: "ok must be boolean",
+  }),
+  { source: "kernel" }
+);
+assertThrows(
+  "schema validator enforcement works",
+  () => schemaValidationBus.emit("schema:checked", { ok: "nope" }, { source: "kernel" }),
+  EventContractError
+);
+const schemaValidationDiagnostics = schemaValidationBus
+  .history()
+  .filter((entry) => entry.name === "diagnostic:schema_violation");
+assertTrue(
+  "schema validator enforcement diagnostic recorded",
+  schemaValidationDiagnostics.length > 0
+);
+
+const permissionValidationBus = new EventBus();
+const permissionValidationPermissions = new PermissionSystem(permissionValidationBus);
+permissionValidationBus.setPermissionChecker(permissionValidationPermissions);
+const permissionValidationRegistry = new SchemaRegistry(
+  permissionValidationBus,
+  permissionValidationPermissions
+);
+permissionValidationRegistry.registerDeclarations("owner-module", [
+  { key: "schema:bound" },
+]);
+assertThrows(
+  "schema validator binding requires permission",
+  () =>
+    permissionValidationRegistry.bindValidator(
+      "schema:bound",
+      () => ({ ok: true }),
+      { source: "module-a" }
+    ),
+  PermissionError
+);
+const permissionBindingDiagnostics = permissionValidationBus
+  .history()
+  .filter((entry) => entry.name === "diagnostic:permission_violation");
+assertTrue(
+  "schema validator permission violation diagnostic recorded",
+  permissionBindingDiagnostics.length > 0
+);
+
+const snapshotBus = new EventBus();
+const snapshotPermissions = new PermissionSystem(snapshotBus);
+snapshotBus.setPermissionChecker(snapshotPermissions);
+const snapshotRegistry = new SchemaRegistry(snapshotBus, snapshotPermissions);
+const snapshotLoader = new ModuleLoader(snapshotBus, snapshotPermissions, snapshotRegistry);
+const snapshotWatchdog = new WatchdogCore(snapshotBus, snapshotLoader, {
+  defaultPolicy: "WARN",
+});
+snapshotWatchdog.start();
+const snapshotCache = new CacheStore(snapshotPermissions);
+const snapshotter = new KernelSnapshotter({
+  eventBus: snapshotBus,
+  moduleLoader: snapshotLoader,
+  schemaRegistry: snapshotRegistry,
+  watchdog: snapshotWatchdog,
+  cacheStore: snapshotCache,
+});
+const snapshotDefinition: ModuleDefinition = {
+  manifest: {
+    id: "snapshot-module",
+    version: "1.0.0",
+    permissions: [],
+  },
+  module: {
+    name: "snapshot-module",
+    start: (context: ModuleContext) => {
+      context.emit("snapshot:event", { ok: true });
+    },
+    stop: () => undefined,
+  },
+};
+snapshotLoader.register(snapshotDefinition);
+snapshotLoader.start("snapshot-module");
+const runningSnapshot = snapshotter.snapshot();
+assertTrue(
+  "snapshot includes running module",
+  runningSnapshot.modules.some((entry) => entry.id === "snapshot-module" && entry.state === "running")
+);
+snapshotLoader.stop("snapshot-module");
+const stoppedSnapshot = snapshotter.snapshot();
+assertTrue(
+  "snapshot includes stopped module",
+  stoppedSnapshot.modules.some((entry) => entry.id === "snapshot-module" && entry.state === "stopped")
+);
+snapshotLoader.isolate("snapshot-module");
+const isolatedSnapshot = snapshotter.snapshot();
+assertTrue(
+  "snapshot includes isolated module",
+  isolatedSnapshot.modules.some(
+    (entry) => entry.id === "snapshot-module" && entry.state === "isolated"
+  )
+);
+for (let i = 0; i < 70; i += 1) {
+  snapshotBus.emit("snapshot:noise", { index: i }, { source: "snapshot-module" });
+}
+const boundedSnapshot = snapshotter.snapshot();
+assertTrue("snapshot history tail bounded", boundedSnapshot.eventBus.historyTail.length <= 50);
+assertTrue("snapshot total history exceeds tail", boundedSnapshot.eventBus.counts.totalHistory > 50);
+assertTrue("snapshot has meta", Boolean(boundedSnapshot.meta));
+assertTrue("snapshot has modules", Array.isArray(boundedSnapshot.modules));
+assertTrue("snapshot has eventBus", Boolean(boundedSnapshot.eventBus));
+assertTrue("snapshot has schemas", Boolean(boundedSnapshot.schemas));
+const snapshotJson = JSON.stringify(boundedSnapshot);
+assertTrue("snapshot JSON safe", snapshotJson.length > 0);
+pendingChecks.push(
+  snapshotCache.set("secret", "top-secret", { source: "kernel" }).then(() => {
+    const cacheSnapshot = snapshotter.snapshot();
+    const cacheJson = JSON.stringify(cacheSnapshot);
+    assertTrue("snapshot includes cache size", cacheSnapshot.cache?.size === 1);
+    assertTrue("snapshot omits cache values", !cacheJson.includes("top-secret"));
+  })
+);
+
+const bridgeBus = new EventBus();
+const bridgePermissions = new PermissionSystem(bridgeBus);
+bridgeBus.setPermissionChecker(bridgePermissions);
+const bridgeRegistry = new SchemaRegistry(bridgeBus, bridgePermissions);
+const bridgeLoader = new ModuleLoader(bridgeBus, bridgePermissions, bridgeRegistry);
+const bridgeHost = new MemoryHost();
+const bridgeCache = new CacheStore(bridgePermissions, bridgeHost);
+const bridgeSnapshotter = new KernelSnapshotter({
+  eventBus: bridgeBus,
+  moduleLoader: bridgeLoader,
+  schemaRegistry: bridgeRegistry,
+});
+const bridge = new KernelBridge({
+  eventBus: bridgeBus,
+  moduleLoader: bridgeLoader,
+  cacheStore: bridgeCache,
+  schemaRegistry: bridgeRegistry,
+  snapshotter: bridgeSnapshotter,
+});
+const transport = new LocalKernelTransport(bridge);
+const unified = new UnifiedKernelTransport({
+  local: transport,
+  mode: "node",
+});
+
+const bridgeSnapshot = bridge.dispatch("kernel.snapshot.get", {}, { source: "kernel" });
+assertTrue("bridge snapshot JSON safe", JSON.stringify(bridgeSnapshot).length > 0);
+pendingChecks.push(
+  transport.request("kernel.snapshot.get", {}, { source: "kernel" }).then((snapshot) => {
+    assertTrue("transport snapshot JSON safe", JSON.stringify(snapshot).length > 0);
+  })
+);
+pendingChecks.push(
+  unified.request("kernel.snapshot.get", {}, { source: "kernel" }).then((snapshot) => {
+    assertTrue("unified snapshot JSON safe", JSON.stringify(snapshot).length > 0);
+  })
+);
+pendingChecks.push(
+  unified.request("host.store.set", { key: "nope", value: "nope" }, { source: "kernel" }).then(
+    (result) => {
+      assertTrue(
+        "unified host store returns unavailable",
+        (result as { ok?: boolean; error?: { code?: string } }).error?.code === "HOST_UNAVAILABLE"
+      );
+    }
+  )
+);
+pendingChecks.push(
+  unified.request("unknown.prefix", {}, { source: "kernel" }).then((result) => {
+    assertTrue(
+      "unified unknown prefix error",
+      (result as { ok?: boolean; error?: { code?: string } }).error?.code ===
+        "UNKNOWN_COMMAND_PREFIX"
+    );
+  })
+);
+
+bridgeLoader.register(dummyModule);
+bridgeLoader.start(dummyModule.name);
+assertThrows(
+  "bridge module.stop enforces permission",
+  () => bridge.dispatch("module.stop", { id: dummyModule.name }, { source: "module-a" }),
+  PermissionError
+);
+bridge.dispatch("module.stop", { id: dummyModule.name }, { source: "kernel" });
+
+assertThrows(
+  "bridge event.emit blocks kernel namespace",
+  () =>
+    bridge.dispatch(
+      "event.emit",
+      { name: "kernel:forbidden", payload: {} },
+      { source: "module-a" }
+    ),
+  EventContractError
+);
+assertThrows(
+  "bridge event.emit blocks reserved without permission",
+  () =>
+    bridge.dispatch(
+      "event.emit",
+      { name: "system:forbidden", payload: {} },
+      { source: "module-a" }
+    ),
+  PermissionError
+);
+
+assertRejects(
+  "bridge cache.set enforces permission",
+  bridge.dispatch("cache.set", { key: "bridge-denied", value: "nope" }, { source: "module-a" }) as Promise<unknown>,
+  PermissionError
+);
+pendingChecks.push(
+  transport
+    .request("cache.set", { key: "bridge-ok", value: "allowed" }, { source: "kernel" })
+    .then(() => transport.request("cache.get", { key: "bridge-ok" }, { source: "kernel" }))
+    .then((result) => {
+      assertTrue(
+        "transport cache.get returns value",
+        (result as { value?: string }).value === "allowed"
+      );
+    })
+);
+assertRejects(
+  "transport cache.set enforces permission",
+  transport.request("cache.set", { key: "bridge-denied", value: "nope" }, { source: "module-a" }),
+  PermissionError
+);
+assertRejects(
+  "transport cache.set rejects non-serializable",
+  transport.request(
+    "cache.set",
+    { key: "bridge-bad", value: { bad: () => undefined } },
+    { source: "kernel" }
+  ),
+  CacheError
+);
+
+assertThrows(
+  "bridge unknown command throws",
+  () => bridge.dispatch("unknown.command" as KernelCommandName, {}, { source: "kernel" }),
+  KernelBridgeError
+);
+
+const tempRoot = await mkdtemp(path.join(os.tmpdir(), "hsb-engine-"));
+const tempBase = path.join(tempRoot, "modules");
+await mkdir(tempBase, { recursive: true });
+const alphaDir = path.join(tempBase, "alpha");
+const betaDir = path.join(tempBase, "beta");
+const gammaDir = path.join(tempBase, "gamma");
+const deltaDir = path.join(tempBase, "delta");
+await mkdir(alphaDir, { recursive: true });
+await mkdir(betaDir, { recursive: true });
+await mkdir(gammaDir, { recursive: true });
+await mkdir(deltaDir, { recursive: true });
+await writeFile(
+  path.join(alphaDir, "manifest.json"),
+  JSON.stringify({ id: "alpha-module", version: "1.0.0", permissions: [] })
+);
+await writeFile(path.join(betaDir, "manifest.json"), "{ invalid json");
+await writeFile(path.join(gammaDir, "manifest.json"), JSON.stringify({ id: "", permissions: [] }));
+
+const discoveryHost = new NodeHost();
+const discoveryBus = new EventBus();
+const discoveryPermissions = new PermissionSystem(discoveryBus);
+discoveryBus.setPermissionChecker(discoveryPermissions);
+const discoveryRegistry = new SchemaRegistry(discoveryBus, discoveryPermissions);
+const discoveryLoader = new ModuleLoader(discoveryBus, discoveryPermissions, discoveryRegistry);
+const discoveryCache = new CacheStore(discoveryPermissions, discoveryHost);
+const discoverySnapshotter = new KernelSnapshotter({
+  eventBus: discoveryBus,
+  moduleLoader: discoveryLoader,
+  schemaRegistry: discoveryRegistry,
+});
+const discoveryBridge = new KernelBridge({
+  eventBus: discoveryBus,
+  moduleLoader: discoveryLoader,
+  cacheStore: discoveryCache,
+  schemaRegistry: discoveryRegistry,
+  snapshotter: discoverySnapshotter,
+  host: discoveryHost,
+});
+const discoveryTransport = new LocalKernelTransport(discoveryBridge);
+const scanResults = (await discoveryTransport.request(
+  "host.modules.scan",
+  { baseDir: tempBase },
+  { source: "kernel" }
+)) as Array<{ manifestPath: string; ok: boolean; error?: string; manifestId?: string }>;
+const sortedScan = [...scanResults].sort((a, b) => a.manifestPath.localeCompare(b.manifestPath));
+assertTrue(
+  "host scan results sorted",
+  JSON.stringify(scanResults) === JSON.stringify(sortedScan)
+);
+assertTrue(
+  "host scan alpha ok",
+  scanResults.some((entry) => entry.ok && entry.manifestId === "alpha-module")
+);
+assertTrue(
+  "host scan beta parse error",
+  scanResults.some(
+    (entry) => entry.manifestPath.includes("beta/manifest.json") && entry.ok === false
+  )
+);
+assertTrue(
+  "host scan gamma manifest invalid",
+  scanResults.some(
+    (entry) => entry.manifestPath.includes("gamma/manifest.json") && entry.ok === false
+  )
+);
+assertTrue(
+  "host scan delta excluded",
+  scanResults.every((entry) => !entry.manifestPath.includes("delta/manifest.json"))
+);
+assertThrows(
+  "host scan requires kernel",
+  () => discoveryBridge.dispatch("host.modules.scan", { baseDir: tempBase }, { source: "module-a" }),
+  KernelBridgeError
+);
+
+const spamBus = new EventBus();
+const spamPermissions = new PermissionSystem(spamBus);
+spamBus.setPermissionChecker(spamPermissions);
+const spamLoader = new ModuleLoader(spamBus, spamPermissions);
+const spamModule = {
+  name: "spam-module",
+  start: (context: ModuleContext) => {
+    for (let i = 0; i < 200; i += 1) {
+      try {
+        context.emit("system:forbidden", { index: i });
+      } catch (error) {
+        if (!(error instanceof PermissionError)) {
+          throw error;
+        }
+      }
+    }
+  },
+  stop: () => undefined,
+};
+spamLoader.register(spamModule);
+let spamStormThrew = false;
+try {
+  spamLoader.start(spamModule.name);
+} catch (error) {
+  if (error instanceof EventContractError) {
+    spamStormThrew = true;
+  } else {
+    throw error;
+  }
+}
+assertTrue("permission spam does not crash kernel", spamStormThrew === false);
+const spamDiagnostics = spamBus
+  .history()
+  .filter((entry) => entry.name === "diagnostic:permission_violation");
+assertTrue(
+  "permission spam diagnostics bounded",
+  spamDiagnostics.length > 0 && spamDiagnostics.length <= 5,
+  `Expected bounded permission diagnostics, got ${spamDiagnostics.length}.`
+);
 
 setTimeout(() => {
   const backpressureDiagnostics = backpressureBus
