@@ -25,3 +25,10 @@ export class PermissionError extends Error {
     this.name = "PermissionError";
   }
 }
+
+export class ManifestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ManifestError";
+  }
+}

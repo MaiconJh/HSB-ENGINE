@@ -4,9 +4,11 @@ import { ModuleLoader } from "../src/kernel/module-loader.ts";
 import { PermissionSystem } from "../src/kernel/permission-system.ts";
 import { WatchdogCore } from "../src/kernel/watchdog-core.ts";
 import { dummyModule } from "../src/modules/dummy-module.ts";
+import type { ModuleDefinition } from "../src/kernel/manifest.ts";
 import type { ModuleContext } from "../src/kernel/module-loader.ts";
 import {
   EventContractError,
+  ManifestError,
   ModuleLifecycleError,
   PermissionError,
 } from "../src/kernel/errors.ts";
@@ -358,6 +360,56 @@ const permissionDiagnostics = permissionBus
   .history()
   .filter((entry) => entry.name === "diagnostic:permission_violation");
 assertTrue("permission violation diagnostics recorded", permissionDiagnostics.length > 0);
+
+const manifestBus = new EventBus();
+const manifestPermissions = new PermissionSystem(manifestBus);
+manifestBus.setPermissionChecker(manifestPermissions);
+const manifestLoader = new ModuleLoader(manifestBus, manifestPermissions);
+const permModuleDefinition: ModuleDefinition = {
+  manifest: {
+    id: "perm-module",
+    version: "1.0.0",
+    permissions: ["event.emit_reserved"],
+  },
+  module: {
+    name: "perm-module",
+    start: (context: ModuleContext) => {
+      context.emit("system:test", { ok: true });
+    },
+    stop: () => undefined,
+  },
+};
+manifestLoader.register(permModuleDefinition);
+let permModuleStarted = false;
+try {
+  manifestLoader.start("perm-module");
+  permModuleStarted = true;
+} catch {
+  permModuleStarted = false;
+}
+assertTrue("manifest permissions grant reserved emit", permModuleStarted);
+
+const invalidManifestDefinition: ModuleDefinition = {
+  manifest: {
+    id: "",
+    version: "1.0.0",
+    permissions: [],
+  },
+  module: {
+    name: "invalid-manifest",
+    start: () => undefined,
+    stop: () => undefined,
+  },
+};
+assertThrows(
+  "invalid manifest rejected",
+  () => manifestLoader.register(invalidManifestDefinition),
+  ManifestError
+);
+const manifestDiagnostics = manifestBus
+  .history()
+  .filter((entry) => entry.name === "diagnostic:manifest_invalid");
+assertTrue("manifest invalid diagnostic recorded", manifestDiagnostics.length > 0);
 
 const spamBus = new EventBus();
 const spamPermissions = new PermissionSystem(spamBus);
