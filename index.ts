@@ -1,10 +1,13 @@
 import { EventBus } from "./src/kernel/event-bus.ts";
 import { CacheStore } from "./src/kernel/cache-store.ts";
-import { MemoryHost } from "./src/host/memory-host.ts";
+import { NodeHost } from "./src/host/node-host.ts";
+import { discoverModules } from "./src/host/module-discovery.ts";
 import { KernelBridge } from "./src/kernel/kernel-bridge.ts";
 import { LocalKernelTransport } from "./src/kernel/kernel-transport.ts";
 import { ModuleLoader } from "./src/kernel/module-loader.ts";
 import type { ModuleDefinition } from "./src/kernel/manifest.ts";
+import type { KernelModule } from "./src/kernel/module-loader.ts";
+import { validateManifest } from "./src/kernel/manifest.ts";
 import { PermissionSystem } from "./src/kernel/permission-system.ts";
 import { SchemaRegistry } from "./src/kernel/schema-registry.ts";
 import { KernelSnapshotter } from "./src/kernel/snapshot.ts";
@@ -63,7 +66,7 @@ moduleLoader.stop(dummyModule.name);
 
 console.log("[Kernel] Event history", eventBus.history());
 
-const host = new MemoryHost();
+const host = new NodeHost();
 const cacheStore = new CacheStore(permissionSystem, host);
 const snapshotter = new KernelSnapshotter({
   eventBus,
@@ -79,6 +82,7 @@ const bridge = new KernelBridge({
   cacheStore,
   schemaRegistry,
   snapshotter,
+  host,
 });
 const transport = new LocalKernelTransport(bridge);
 transport
@@ -86,6 +90,34 @@ transport
   .then((snapshot) => {
     console.log("[Kernel] Bridge snapshot", snapshot);
   });
+
+const runtimeModules: Record<string, KernelModule> = {
+  [dummyModule.name]: dummyModule,
+};
+
+discoverModules(host, "./modules").then((entries) => {
+  for (const entry of entries) {
+    if (entry.error) {
+      console.warn("[Kernel] Module manifest parse failed", entry);
+      continue;
+    }
+    try {
+      const manifest = entry.manifestJson as ModuleDefinition["manifest"];
+      validateManifest(manifest, eventBus);
+      const module = runtimeModules[manifest.id];
+      if (!module) {
+        console.warn("[Kernel] Module runtime missing", { id: manifest.id });
+        continue;
+      }
+      moduleLoader.register({ manifest, module });
+    } catch (error) {
+      console.warn("[Kernel] Module manifest invalid", {
+        path: entry.manifestPath,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+});
 cacheStore
   .set("boot", { ok: true }, { source: "kernel" })
   .then(() => cacheStore.get("boot", { source: "kernel" }))

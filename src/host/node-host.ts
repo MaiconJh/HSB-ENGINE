@@ -1,8 +1,10 @@
+import { access, readdir, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
 import type { HostAdapter } from "./host-adapter.ts";
 
 const MAX_KEYS = 1000;
 
-export class MemoryHost implements HostAdapter {
+export class NodeHost implements HostAdapter {
   private storeMap = new Map<string, unknown>();
 
   store = {
@@ -24,14 +26,20 @@ export class MemoryHost implements HostAdapter {
   };
 
   fs = {
-    listDir: async (_path: string): Promise<string[]> => {
-      throw new Error("MemoryHost.fs.listDir NOT IMPLEMENTED");
+    listDir: async (path: string): Promise<string[]> => {
+      const entries = await readdir(path, { withFileTypes: false });
+      return entries.sort();
     },
-    readTextFile: async (_path: string): Promise<string> => {
-      throw new Error("MemoryHost.fs.readTextFile NOT IMPLEMENTED");
+    readTextFile: async (path: string): Promise<string> => {
+      return readFile(path, "utf8");
     },
-    exists: async (_path: string): Promise<boolean> => {
-      throw new Error("MemoryHost.fs.exists NOT IMPLEMENTED");
+    exists: async (path: string): Promise<boolean> => {
+      try {
+        await access(path, constants.F_OK);
+        return true;
+      } catch {
+        return false;
+      }
     },
   };
 }

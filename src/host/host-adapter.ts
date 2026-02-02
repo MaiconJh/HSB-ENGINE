@@ -5,7 +5,9 @@ export type HostStore = {
 
 export type HostAdapter = {
   store: HostStore;
-  // listModules(): Promise<string[]>; // NOT IMPLEMENTED
-  // readFile(path: string): Promise<string>; // NOT IMPLEMENTED
-  // writeFile(path: string, contents: string): Promise<void>; // NOT IMPLEMENTED
+  fs: {
+    listDir(path: string): Promise<string[]>;
+    readTextFile(path: string): Promise<string>;
+    exists(path: string): Promise<boolean>;
+  };
 };

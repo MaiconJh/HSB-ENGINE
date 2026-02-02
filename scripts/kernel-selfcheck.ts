@@ -1,6 +1,7 @@
 import { CacheStore } from "../src/kernel/cache-store.ts";
 import { EventBus } from "../src/kernel/event-bus.ts";
 import { MemoryHost } from "../src/host/memory-host.ts";
+import { NodeHost } from "../src/host/node-host.ts";
 import { KernelBridge } from "../src/kernel/kernel-bridge.ts";
 import type { KernelCommandName } from "../src/kernel/kernel-bridge.ts";
 import { LocalKernelTransport } from "../src/kernel/kernel-transport.ts";
@@ -12,6 +13,9 @@ import { WatchdogCore } from "../src/kernel/watchdog-core.ts";
 import { dummyModule } from "../src/modules/dummy-module.ts";
 import type { ModuleDefinition } from "../src/kernel/manifest.ts";
 import type { ModuleContext } from "../src/kernel/module-loader.ts";
+import { mkdir, writeFile, mkdtemp } from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
 import {
   EventContractError,
   CacheError,
@@ -689,6 +693,81 @@ assertRejects(
 assertThrows(
   "bridge unknown command throws",
   () => bridge.dispatch("unknown.command" as KernelCommandName, {}, { source: "kernel" }),
+  KernelBridgeError
+);
+
+const tempRoot = await mkdtemp(path.join(os.tmpdir(), "hsb-engine-"));
+const tempBase = path.join(tempRoot, "modules");
+await mkdir(tempBase, { recursive: true });
+const alphaDir = path.join(tempBase, "alpha");
+const betaDir = path.join(tempBase, "beta");
+const gammaDir = path.join(tempBase, "gamma");
+const deltaDir = path.join(tempBase, "delta");
+await mkdir(alphaDir, { recursive: true });
+await mkdir(betaDir, { recursive: true });
+await mkdir(gammaDir, { recursive: true });
+await mkdir(deltaDir, { recursive: true });
+await writeFile(
+  path.join(alphaDir, "manifest.json"),
+  JSON.stringify({ id: "alpha-module", version: "1.0.0", permissions: [] })
+);
+await writeFile(path.join(betaDir, "manifest.json"), "{ invalid json");
+await writeFile(path.join(gammaDir, "manifest.json"), JSON.stringify({ id: "", permissions: [] }));
+
+const discoveryHost = new NodeHost();
+const discoveryBus = new EventBus();
+const discoveryPermissions = new PermissionSystem(discoveryBus);
+discoveryBus.setPermissionChecker(discoveryPermissions);
+const discoveryRegistry = new SchemaRegistry(discoveryBus, discoveryPermissions);
+const discoveryLoader = new ModuleLoader(discoveryBus, discoveryPermissions, discoveryRegistry);
+const discoveryCache = new CacheStore(discoveryPermissions, discoveryHost);
+const discoverySnapshotter = new KernelSnapshotter({
+  eventBus: discoveryBus,
+  moduleLoader: discoveryLoader,
+  schemaRegistry: discoveryRegistry,
+});
+const discoveryBridge = new KernelBridge({
+  eventBus: discoveryBus,
+  moduleLoader: discoveryLoader,
+  cacheStore: discoveryCache,
+  schemaRegistry: discoveryRegistry,
+  snapshotter: discoverySnapshotter,
+  host: discoveryHost,
+});
+const discoveryTransport = new LocalKernelTransport(discoveryBridge);
+const scanResults = (await discoveryTransport.request(
+  "host.modules.scan",
+  { baseDir: tempBase },
+  { source: "kernel" }
+)) as Array<{ manifestPath: string; ok: boolean; error?: string; manifestId?: string }>;
+const sortedScan = [...scanResults].sort((a, b) => a.manifestPath.localeCompare(b.manifestPath));
+assertTrue(
+  "host scan results sorted",
+  JSON.stringify(scanResults) === JSON.stringify(sortedScan)
+);
+assertTrue(
+  "host scan alpha ok",
+  scanResults.some((entry) => entry.ok && entry.manifestId === "alpha-module")
+);
+assertTrue(
+  "host scan beta parse error",
+  scanResults.some(
+    (entry) => entry.manifestPath.includes("beta/manifest.json") && entry.ok === false
+  )
+);
+assertTrue(
+  "host scan gamma manifest invalid",
+  scanResults.some(
+    (entry) => entry.manifestPath.includes("gamma/manifest.json") && entry.ok === false
+  )
+);
+assertTrue(
+  "host scan delta excluded",
+  scanResults.every((entry) => !entry.manifestPath.includes("delta/manifest.json"))
+);
+assertThrows(
+  "host scan requires kernel",
+  () => discoveryBridge.dispatch("host.modules.scan", { baseDir: tempBase }, { source: "module-a" }),
   KernelBridgeError
 );
 

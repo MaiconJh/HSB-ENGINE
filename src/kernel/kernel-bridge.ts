@@ -7,6 +7,9 @@ import type { ModuleLoader } from "./module-loader.ts";
 import type { SchemaRegistry } from "./schema-registry.ts";
 import type { KernelSnapshot, KernelSnapshotter } from "./snapshot.ts";
 import { BUILTIN_VALIDATORS } from "./builtin-validators.ts";
+import type { HostAdapter } from "../host/host-adapter.ts";
+import { discoverModules } from "../host/module-discovery.ts";
+import { validateManifest } from "./manifest.ts";
 
 export type KernelCommandName =
   | "kernel.snapshot.get"
@@ -18,7 +21,8 @@ export type KernelCommandName =
   | "module.reset"
   | "cache.get"
   | "cache.set"
-  | "schema.bindValidator";
+  | "schema.bindValidator"
+  | "host.modules.scan";
 
 export type KernelCommandMeta = {
   source: string;
@@ -38,6 +42,7 @@ export class KernelBridge {
   private cacheStore: CacheStore;
   private schemaRegistry: SchemaRegistry;
   private snapshotter: KernelSnapshotter;
+  private host?: HostAdapter;
 
   constructor(options: {
     eventBus: EventBus;
@@ -45,12 +50,14 @@ export class KernelBridge {
     cacheStore: CacheStore;
     schemaRegistry: SchemaRegistry;
     snapshotter: KernelSnapshotter;
+    host?: HostAdapter;
   }) {
     this.eventBus = options.eventBus;
     this.moduleLoader = options.moduleLoader;
     this.cacheStore = options.cacheStore;
     this.schemaRegistry = options.schemaRegistry;
     this.snapshotter = options.snapshotter;
+    this.host = options.host;
   }
 
   dispatch(
@@ -86,6 +93,8 @@ export class KernelBridge {
         return this.handleCacheSet(payload, meta);
       case "schema.bindValidator":
         return this.handleSchemaBind(payload, meta);
+      case "host.modules.scan":
+        return this.handleHostModulesScan(payload, meta);
       default:
         throw new KernelBridgeError(`Unknown kernel command "${name}".`);
     }
@@ -233,6 +242,46 @@ export class KernelBridge {
     }
     this.schemaRegistry.bindValidator(key, validator, { source: meta.source });
     return { ok: true };
+  }
+
+  private handleHostModulesScan(
+    payload: unknown,
+    meta: KernelCommandMeta
+  ): Promise<
+    Array<{ manifestPath: string; ok: boolean; error?: string; manifestId?: string }>
+  > {
+    if (meta.source !== "kernel") {
+      throw new KernelBridgeError("host.modules.scan is restricted to kernel.");
+    }
+    if (!this.host) {
+      throw new KernelBridgeError("host.modules.scan requires a host adapter.");
+    }
+    const { baseDir } = this.assertPayloadShape<{ baseDir: string }>(
+      payload,
+      ["baseDir"],
+      "host.modules.scan"
+    );
+    if (typeof baseDir !== "string" || baseDir.length === 0) {
+      throw new KernelBridgeError("host.modules.scan requires a baseDir.");
+    }
+    return discoverModules(this.host, baseDir).then((entries) =>
+      entries.map((entry) => {
+        if (entry.error) {
+          return { manifestPath: entry.manifestPath, ok: false, error: entry.error };
+        }
+        try {
+          validateManifest(entry.manifestJson as ModuleManifest, this.eventBus);
+          const manifestId = (entry.manifestJson as ModuleManifest).id;
+          return { manifestPath: entry.manifestPath, ok: true, manifestId };
+        } catch (error) {
+          return {
+            manifestPath: entry.manifestPath,
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      })
+    );
   }
 
   private assertMeta(meta: KernelCommandMeta): void {
