@@ -83,6 +83,29 @@ export class WatchdogCore {
     );
   }
 
+  snapshot(): {
+    policy: { defaultPolicy: WatchdogPolicy; moduleOverrides: number };
+    stats: Array<{
+      moduleId: string;
+      signalRateViolations: number;
+      invariantViolations: number;
+      consecutiveBursts: number;
+    }>;
+  } {
+    return {
+      policy: {
+        defaultPolicy: this.config.defaultPolicy,
+        moduleOverrides: Object.keys(this.config.modulePolicies ?? {}).length,
+      },
+      stats: Array.from(this.stats.entries()).map(([moduleId, stat]) => ({
+        moduleId,
+        signalRateViolations: stat.signalRateViolations,
+        invariantViolations: stat.invariantViolations,
+        consecutiveBursts: stat.consecutiveBursts,
+      })),
+    };
+  }
+
   private getStats(moduleId: string): ModuleStats {
     const existing = this.stats.get(moduleId);
     if (existing) {

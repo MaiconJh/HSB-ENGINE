@@ -191,6 +191,18 @@ export class EventBus {
     return [...this.events];
   }
 
+  getListenerCount(): number {
+    return this.totalListeners;
+  }
+
+  getQueueSize(): number {
+    return this.queue.length;
+  }
+
+  getSchemaCount(): number {
+    return this.schemas.size;
+  }
+
   registerSchema(
     key: string,
     validator: SchemaValidator,
