@@ -1,6 +1,7 @@
 import { EventBus } from "./src/kernel/event-bus.ts";
 import { CacheStore } from "./src/kernel/cache-store.ts";
 import { ModuleLoader } from "./src/kernel/module-loader.ts";
+import type { ModuleDefinition } from "./src/kernel/manifest.ts";
 import { PermissionSystem } from "./src/kernel/permission-system.ts";
 import { WatchdogCore } from "./src/kernel/watchdog-core.ts";
 import { dummyModule } from "./src/modules/dummy-module.ts";
@@ -29,7 +30,25 @@ eventBus.listen(
   { source: "kernel" }
 );
 
-moduleLoader.register(dummyModule);
+const dummyDefinition: ModuleDefinition = {
+  manifest: {
+    id: dummyModule.name,
+    version: "1.0.0",
+    permissions: [],
+    displayName: "Dummy Module",
+    schemas: [{ key: "dummy.started" }, { key: "dummy.stopped" }],
+  },
+  module: dummyModule,
+};
+
+moduleLoader.register(dummyDefinition);
+const manifest = moduleLoader.getManifest(dummyModule.name);
+if (manifest?.schemas?.length) {
+  console.log("[Kernel] Module schemas declared", {
+    moduleId: manifest.id,
+    schemas: manifest.schemas.map((schema) => schema.key),
+  });
+}
 moduleLoader.start(dummyModule.name);
 
 eventBus.emit("kernel.tick", { at: Date.now() }, { source: "kernel" });
