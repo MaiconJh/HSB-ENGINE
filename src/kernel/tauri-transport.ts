@@ -1,4 +1,4 @@
-import type { KernelCommandMeta, KernelCommandName } from "./kernel-bridge.ts";
+import type { KernelCommandMeta } from "./kernel-bridge.ts";
 import { KernelBridgeError } from "./errors.ts";
 
 export type IpcRequest = {
@@ -22,11 +22,7 @@ export class TauriKernelTransport {
     this.invokeCommand = options?.invokeCommand ?? "hsb_ipc";
   }
 
-  async request(
-    cmd: KernelCommandName,
-    payload: unknown,
-    meta: KernelCommandMeta
-  ): Promise<unknown> {
+  async request(cmd: string, payload: unknown, meta: KernelCommandMeta): Promise<unknown> {
     const { invoke } = await import("@tauri-apps/api/tauri");
     const request: IpcRequest = {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,

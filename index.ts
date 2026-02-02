@@ -4,6 +4,8 @@ import { NodeHost } from "./src/host/node-host.ts";
 import { discoverModules } from "./src/host/module-discovery.ts";
 import { KernelBridge } from "./src/kernel/kernel-bridge.ts";
 import { LocalKernelTransport } from "./src/kernel/kernel-transport.ts";
+import { TauriKernelTransport } from "./src/kernel/tauri-transport.ts";
+import { UnifiedKernelTransport } from "./src/kernel/unified-transport.ts";
 import { ModuleLoader } from "./src/kernel/module-loader.ts";
 import type { ModuleDefinition } from "./src/kernel/manifest.ts";
 import type { KernelModule } from "./src/kernel/module-loader.ts";
@@ -84,12 +86,19 @@ const bridge = new KernelBridge({
   snapshotter,
   host,
 });
-const transport = new LocalKernelTransport(bridge);
-transport
-  .request("kernel.snapshot.get", {}, { source: "kernel" })
-  .then((snapshot) => {
-    console.log("[Kernel] Bridge snapshot", snapshot);
-  });
+const localTransport = new LocalKernelTransport(bridge);
+const tauriTransport =
+  typeof (globalThis as { __TAURI__?: unknown }).__TAURI__ !== "undefined"
+    ? new TauriKernelTransport()
+    : undefined;
+const transport = new UnifiedKernelTransport({
+  local: localTransport,
+  tauri: tauriTransport,
+  mode: "node",
+});
+transport.request("kernel.snapshot.get", {}, { source: "kernel" }).then((snapshot) => {
+  console.log("[Kernel] Bridge snapshot", snapshot);
+});
 
 const runtimeModules: Record<string, KernelModule> = {
   [dummyModule.name]: dummyModule,

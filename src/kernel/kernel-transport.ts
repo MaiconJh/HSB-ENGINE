@@ -1,7 +1,7 @@
 import type { KernelCommandMeta, KernelCommandName, KernelBridge } from "./kernel-bridge.ts";
 
 export type KernelTransport = {
-  request(name: KernelCommandName, payload: unknown, meta: KernelCommandMeta): Promise<unknown>;
+  request(name: string, payload: unknown, meta: KernelCommandMeta): Promise<unknown>;
 };
 
 export class LocalKernelTransport implements KernelTransport {
@@ -11,7 +11,7 @@ export class LocalKernelTransport implements KernelTransport {
     this.bridge = bridge;
   }
 
-  request(name: KernelCommandName, payload: unknown, meta: KernelCommandMeta): Promise<unknown> {
-    return Promise.resolve(this.bridge.dispatch(name, payload, meta));
+  request(name: string, payload: unknown, meta: KernelCommandMeta): Promise<unknown> {
+    return Promise.resolve(this.bridge.dispatch(name as KernelCommandName, payload, meta));
   }
 }

@@ -5,6 +5,7 @@ import { NodeHost } from "../src/host/node-host.ts";
 import { KernelBridge } from "../src/kernel/kernel-bridge.ts";
 import type { KernelCommandName } from "../src/kernel/kernel-bridge.ts";
 import { LocalKernelTransport } from "../src/kernel/kernel-transport.ts";
+import { UnifiedKernelTransport } from "../src/kernel/unified-transport.ts";
 import { ModuleLoader } from "../src/kernel/module-loader.ts";
 import { PermissionSystem } from "../src/kernel/permission-system.ts";
 import { SchemaRegistry } from "../src/kernel/schema-registry.ts";
@@ -620,12 +621,40 @@ const bridge = new KernelBridge({
   snapshotter: bridgeSnapshotter,
 });
 const transport = new LocalKernelTransport(bridge);
+const unified = new UnifiedKernelTransport({
+  local: transport,
+  mode: "node",
+});
 
 const bridgeSnapshot = bridge.dispatch("kernel.snapshot.get", {}, { source: "kernel" });
 assertTrue("bridge snapshot JSON safe", JSON.stringify(bridgeSnapshot).length > 0);
 pendingChecks.push(
   transport.request("kernel.snapshot.get", {}, { source: "kernel" }).then((snapshot) => {
     assertTrue("transport snapshot JSON safe", JSON.stringify(snapshot).length > 0);
+  })
+);
+pendingChecks.push(
+  unified.request("kernel.snapshot.get", {}, { source: "kernel" }).then((snapshot) => {
+    assertTrue("unified snapshot JSON safe", JSON.stringify(snapshot).length > 0);
+  })
+);
+pendingChecks.push(
+  unified.request("host.store.set", { key: "nope", value: "nope" }, { source: "kernel" }).then(
+    (result) => {
+      assertTrue(
+        "unified host store returns unavailable",
+        (result as { ok?: boolean; error?: { code?: string } }).error?.code === "HOST_UNAVAILABLE"
+      );
+    }
+  )
+);
+pendingChecks.push(
+  unified.request("unknown.prefix", {}, { source: "kernel" }).then((result) => {
+    assertTrue(
+      "unified unknown prefix error",
+      (result as { ok?: boolean; error?: { code?: string } }).error?.code ===
+        "UNKNOWN_COMMAND_PREFIX"
+    );
   })
 );
 
