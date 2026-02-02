@@ -1,7 +1,9 @@
 import { CacheStore } from "../src/kernel/cache-store.ts";
 import { EventBus } from "../src/kernel/event-bus.ts";
+import { MemoryHost } from "../src/host/memory-host.ts";
 import { KernelBridge } from "../src/kernel/kernel-bridge.ts";
 import type { KernelCommandName } from "../src/kernel/kernel-bridge.ts";
+import { LocalKernelTransport } from "../src/kernel/kernel-transport.ts";
 import { ModuleLoader } from "../src/kernel/module-loader.ts";
 import { PermissionSystem } from "../src/kernel/permission-system.ts";
 import { SchemaRegistry } from "../src/kernel/schema-registry.ts";
@@ -12,6 +14,7 @@ import type { ModuleDefinition } from "../src/kernel/manifest.ts";
 import type { ModuleContext } from "../src/kernel/module-loader.ts";
 import {
   EventContractError,
+  CacheError,
   KernelBridgeError,
   ManifestError,
   ModuleLifecycleError,
@@ -598,7 +601,8 @@ const bridgePermissions = new PermissionSystem(bridgeBus);
 bridgeBus.setPermissionChecker(bridgePermissions);
 const bridgeRegistry = new SchemaRegistry(bridgeBus, bridgePermissions);
 const bridgeLoader = new ModuleLoader(bridgeBus, bridgePermissions, bridgeRegistry);
-const bridgeCache = new CacheStore(bridgePermissions);
+const bridgeHost = new MemoryHost();
+const bridgeCache = new CacheStore(bridgePermissions, bridgeHost);
 const bridgeSnapshotter = new KernelSnapshotter({
   eventBus: bridgeBus,
   moduleLoader: bridgeLoader,
@@ -611,9 +615,15 @@ const bridge = new KernelBridge({
   schemaRegistry: bridgeRegistry,
   snapshotter: bridgeSnapshotter,
 });
+const transport = new LocalKernelTransport(bridge);
 
 const bridgeSnapshot = bridge.dispatch("kernel.snapshot.get", {}, { source: "kernel" });
 assertTrue("bridge snapshot JSON safe", JSON.stringify(bridgeSnapshot).length > 0);
+pendingChecks.push(
+  transport.request("kernel.snapshot.get", {}, { source: "kernel" }).then((snapshot) => {
+    assertTrue("transport snapshot JSON safe", JSON.stringify(snapshot).length > 0);
+  })
+);
 
 bridgeLoader.register(dummyModule);
 bridgeLoader.start(dummyModule.name);
@@ -651,20 +661,29 @@ assertRejects(
   PermissionError
 );
 pendingChecks.push(
-  (bridge.dispatch(
-    "cache.set",
-    { key: "bridge-ok", value: "allowed" },
-    { source: "kernel" }
-  ) as Promise<unknown>)
-    .then(() =>
-      bridge.dispatch("cache.get", { key: "bridge-ok" }, { source: "kernel" })
-    )
+  transport
+    .request("cache.set", { key: "bridge-ok", value: "allowed" }, { source: "kernel" })
+    .then(() => transport.request("cache.get", { key: "bridge-ok" }, { source: "kernel" }))
     .then((result) => {
       assertTrue(
-        "bridge cache.get returns value",
+        "transport cache.get returns value",
         (result as { value?: string }).value === "allowed"
       );
     })
+);
+assertRejects(
+  "transport cache.set enforces permission",
+  transport.request("cache.set", { key: "bridge-denied", value: "nope" }, { source: "module-a" }),
+  PermissionError
+);
+assertRejects(
+  "transport cache.set rejects non-serializable",
+  transport.request(
+    "cache.set",
+    { key: "bridge-bad", value: { bad: () => undefined } },
+    { source: "kernel" }
+  ),
+  CacheError
 );
 
 assertThrows(

@@ -1,6 +1,8 @@
 import { EventBus } from "./src/kernel/event-bus.ts";
 import { CacheStore } from "./src/kernel/cache-store.ts";
+import { MemoryHost } from "./src/host/memory-host.ts";
 import { KernelBridge } from "./src/kernel/kernel-bridge.ts";
+import { LocalKernelTransport } from "./src/kernel/kernel-transport.ts";
 import { ModuleLoader } from "./src/kernel/module-loader.ts";
 import type { ModuleDefinition } from "./src/kernel/manifest.ts";
 import { PermissionSystem } from "./src/kernel/permission-system.ts";
@@ -61,7 +63,8 @@ moduleLoader.stop(dummyModule.name);
 
 console.log("[Kernel] Event history", eventBus.history());
 
-const cacheStore = new CacheStore(permissionSystem);
+const host = new MemoryHost();
+const cacheStore = new CacheStore(permissionSystem, host);
 const snapshotter = new KernelSnapshotter({
   eventBus,
   moduleLoader,
@@ -77,10 +80,12 @@ const bridge = new KernelBridge({
   schemaRegistry,
   snapshotter,
 });
-console.log(
-  "[Kernel] Bridge snapshot",
-  bridge.dispatch("kernel.snapshot.get", {}, { source: "kernel" })
-);
+const transport = new LocalKernelTransport(bridge);
+transport
+  .request("kernel.snapshot.get", {}, { source: "kernel" })
+  .then((snapshot) => {
+    console.log("[Kernel] Bridge snapshot", snapshot);
+  });
 cacheStore
   .set("boot", { ok: true }, { source: "kernel" })
   .then(() => cacheStore.get("boot", { source: "kernel" }))

@@ -46,3 +46,10 @@ export class KernelBridgeError extends Error {
     this.name = "KernelBridgeError";
   }
 }
+
+export class CacheError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CacheError";
+  }
+}
