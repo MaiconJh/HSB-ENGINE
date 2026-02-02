@@ -4,6 +4,7 @@ import { ModuleLoader } from "./src/kernel/module-loader.ts";
 import type { ModuleDefinition } from "./src/kernel/manifest.ts";
 import { PermissionSystem } from "./src/kernel/permission-system.ts";
 import { SchemaRegistry } from "./src/kernel/schema-registry.ts";
+import { KernelSnapshotter } from "./src/kernel/snapshot.ts";
 import { WatchdogCore } from "./src/kernel/watchdog-core.ts";
 import { dummyModule } from "./src/modules/dummy-module.ts";
 
@@ -60,6 +61,14 @@ moduleLoader.stop(dummyModule.name);
 console.log("[Kernel] Event history", eventBus.history());
 
 const cacheStore = new CacheStore(permissionSystem);
+const snapshotter = new KernelSnapshotter({
+  eventBus,
+  moduleLoader,
+  schemaRegistry,
+  watchdog,
+  cacheStore,
+});
+console.log("[Kernel] Snapshot", snapshotter.snapshot());
 cacheStore
   .set("boot", { ok: true }, { source: "kernel" })
   .then(() => cacheStore.get("boot", { source: "kernel" }))

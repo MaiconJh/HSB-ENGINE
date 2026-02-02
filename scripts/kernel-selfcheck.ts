@@ -3,6 +3,7 @@ import { EventBus } from "../src/kernel/event-bus.ts";
 import { ModuleLoader } from "../src/kernel/module-loader.ts";
 import { PermissionSystem } from "../src/kernel/permission-system.ts";
 import { SchemaRegistry } from "../src/kernel/schema-registry.ts";
+import { KernelSnapshotter } from "../src/kernel/snapshot.ts";
 import { WatchdogCore } from "../src/kernel/watchdog-core.ts";
 import { dummyModule } from "../src/modules/dummy-module.ts";
 import type { ModuleDefinition } from "../src/kernel/manifest.ts";
@@ -514,6 +515,79 @@ const permissionBindingDiagnostics = permissionValidationBus
 assertTrue(
   "schema validator permission violation diagnostic recorded",
   permissionBindingDiagnostics.length > 0
+);
+
+const snapshotBus = new EventBus();
+const snapshotPermissions = new PermissionSystem(snapshotBus);
+snapshotBus.setPermissionChecker(snapshotPermissions);
+const snapshotRegistry = new SchemaRegistry(snapshotBus, snapshotPermissions);
+const snapshotLoader = new ModuleLoader(snapshotBus, snapshotPermissions, snapshotRegistry);
+const snapshotWatchdog = new WatchdogCore(snapshotBus, snapshotLoader, {
+  defaultPolicy: "WARN",
+});
+snapshotWatchdog.start();
+const snapshotCache = new CacheStore(snapshotPermissions);
+const snapshotter = new KernelSnapshotter({
+  eventBus: snapshotBus,
+  moduleLoader: snapshotLoader,
+  schemaRegistry: snapshotRegistry,
+  watchdog: snapshotWatchdog,
+  cacheStore: snapshotCache,
+});
+const snapshotDefinition: ModuleDefinition = {
+  manifest: {
+    id: "snapshot-module",
+    version: "1.0.0",
+    permissions: [],
+  },
+  module: {
+    name: "snapshot-module",
+    start: (context: ModuleContext) => {
+      context.emit("snapshot:event", { ok: true });
+    },
+    stop: () => undefined,
+  },
+};
+snapshotLoader.register(snapshotDefinition);
+snapshotLoader.start("snapshot-module");
+const runningSnapshot = snapshotter.snapshot();
+assertTrue(
+  "snapshot includes running module",
+  runningSnapshot.modules.some((entry) => entry.id === "snapshot-module" && entry.state === "running")
+);
+snapshotLoader.stop("snapshot-module");
+const stoppedSnapshot = snapshotter.snapshot();
+assertTrue(
+  "snapshot includes stopped module",
+  stoppedSnapshot.modules.some((entry) => entry.id === "snapshot-module" && entry.state === "stopped")
+);
+snapshotLoader.isolate("snapshot-module");
+const isolatedSnapshot = snapshotter.snapshot();
+assertTrue(
+  "snapshot includes isolated module",
+  isolatedSnapshot.modules.some(
+    (entry) => entry.id === "snapshot-module" && entry.state === "isolated"
+  )
+);
+for (let i = 0; i < 70; i += 1) {
+  snapshotBus.emit("snapshot:noise", { index: i }, { source: "snapshot-module" });
+}
+const boundedSnapshot = snapshotter.snapshot();
+assertTrue("snapshot history tail bounded", boundedSnapshot.eventBus.historyTail.length <= 50);
+assertTrue("snapshot total history exceeds tail", boundedSnapshot.eventBus.counts.totalHistory > 50);
+assertTrue("snapshot has meta", Boolean(boundedSnapshot.meta));
+assertTrue("snapshot has modules", Array.isArray(boundedSnapshot.modules));
+assertTrue("snapshot has eventBus", Boolean(boundedSnapshot.eventBus));
+assertTrue("snapshot has schemas", Boolean(boundedSnapshot.schemas));
+const snapshotJson = JSON.stringify(boundedSnapshot);
+assertTrue("snapshot JSON safe", snapshotJson.length > 0);
+pendingChecks.push(
+  snapshotCache.set("secret", "top-secret", { source: "kernel" }).then(() => {
+    const cacheSnapshot = snapshotter.snapshot();
+    const cacheJson = JSON.stringify(cacheSnapshot);
+    assertTrue("snapshot includes cache size", cacheSnapshot.cache?.size === 1);
+    assertTrue("snapshot omits cache values", !cacheJson.includes("top-secret"));
+  })
 );
 
 const spamBus = new EventBus();

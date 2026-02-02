@@ -227,6 +227,33 @@ export class ModuleLoader {
     return this.states.get(name);
   }
 
+  snapshot(): Array<{
+    id: string;
+    state: ModuleState;
+    manifest?: {
+      id: string;
+      version: string;
+      permissionsCount: number;
+      schemasCount: number;
+    };
+  }> {
+    return Array.from(this.modules.keys()).map((moduleId) => {
+      const manifest = this.manifests.get(moduleId);
+      return {
+        id: moduleId,
+        state: this.states.get(moduleId) ?? "registered",
+        manifest: manifest
+          ? {
+              id: manifest.id,
+              version: manifest.version,
+              permissionsCount: manifest.permissions.length,
+              schemasCount: manifest.schemas?.length ?? 0,
+            }
+          : undefined,
+      };
+    });
+  }
+
   private registerDefinition(definition: ModuleDefinition): void {
     if (!definition?.manifest || !definition?.module) {
       throw new ManifestError("Module definition requires manifest and module.");
