@@ -25,4 +25,8 @@ export class CacheStore {
     });
     this.store.set(key, value);
   }
+
+  getSize(): number {
+    return this.store.size;
+  }
 }
