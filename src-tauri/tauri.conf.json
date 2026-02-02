@@ -1,0 +1,24 @@
+{
+  "build": {
+    "beforeBuildCommand": "",
+    "beforeDevCommand": "",
+    "devPath": "http://localhost:1420",
+    "distDir": "../dist"
+  },
+  "package": {
+    "productName": "HSB Engine",
+    "version": "0.1.0"
+  },
+  "tauri": {
+    "windows": [
+      {
+        "title": "HSB Engine",
+        "width": 800,
+        "height": 600
+      }
+    ],
+    "bundle": {
+      "identifier": "com.hsb.engine"
+    }
+  }
+}
