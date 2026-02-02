@@ -10,10 +10,14 @@ import { BUILTIN_VALIDATORS } from "./builtin-validators.ts";
 import type { HostAdapter } from "../host/host-adapter.ts";
 import { discoverModules } from "../host/module-discovery.ts";
 import { validateManifest } from "./manifest.ts";
+import type { PermissionSystem } from "./permission-system.ts";
 
 export type KernelCommandName =
   | "kernel.snapshot.get"
   | "event.emit"
+  | "kernel.events.tail"
+  | "kernel.modules.list"
+  | "kernel.diagnostics.tail"
   | "module.register"
   | "module.start"
   | "module.stop"
@@ -35,6 +39,15 @@ type ModuleRegisterPayload =
 type CacheGetResult = { value: unknown };
 type CacheSetResult = { ok: true };
 type ModuleCommandResult = { ok: true; state?: string };
+type TailEventsResult = { ok: true; data: { events: EventRecord[] } };
+type ModulesListResult = { ok: true; data: { modules: Array<{ id: string; state: string }> } };
+
+type EventRecord = {
+  name: string;
+  payload: unknown;
+  timestamp: number;
+  source: string;
+};
 
 export class KernelBridge {
   private eventBus: EventBus;
@@ -43,6 +56,7 @@ export class KernelBridge {
   private schemaRegistry: SchemaRegistry;
   private snapshotter: KernelSnapshotter;
   private host?: HostAdapter;
+  private permissionSystem?: PermissionSystem;
 
   constructor(options: {
     eventBus: EventBus;
@@ -51,6 +65,7 @@ export class KernelBridge {
     schemaRegistry: SchemaRegistry;
     snapshotter: KernelSnapshotter;
     host?: HostAdapter;
+    permissionSystem?: PermissionSystem;
   }) {
     this.eventBus = options.eventBus;
     this.moduleLoader = options.moduleLoader;
@@ -58,6 +73,7 @@ export class KernelBridge {
     this.schemaRegistry = options.schemaRegistry;
     this.snapshotter = options.snapshotter;
     this.host = options.host;
+    this.permissionSystem = options.permissionSystem;
   }
 
   dispatch(
@@ -69,6 +85,8 @@ export class KernelBridge {
     | CacheGetResult
     | CacheSetResult
     | ModuleCommandResult
+    | TailEventsResult
+    | ModulesListResult
     | Promise<unknown> {
     this.assertMeta(meta);
     switch (name) {
@@ -77,6 +95,12 @@ export class KernelBridge {
         return this.snapshotter.snapshot();
       case "event.emit":
         return this.handleEventEmit(payload, meta);
+      case "kernel.events.tail":
+        return this.handleEventsTail(payload, meta);
+      case "kernel.modules.list":
+        return this.handleModulesList(payload, meta);
+      case "kernel.diagnostics.tail":
+        return this.handleDiagnosticsTail(payload, meta);
       case "module.register":
         return this.handleModuleRegister(payload, meta);
       case "module.start":
@@ -244,6 +268,34 @@ export class KernelBridge {
     return { ok: true };
   }
 
+  private handleEventsTail(payload: unknown, meta: KernelCommandMeta): TailEventsResult {
+    this.assertTelemetryAccess(meta, "kernel.events.tail");
+    const limit = this.parseTailLimit(payload, "kernel.events.tail");
+    const events = this.eventBus.history().slice(-limit);
+    return { ok: true, data: { events } };
+  }
+
+  private handleModulesList(payload: unknown, meta: KernelCommandMeta): ModulesListResult {
+    this.assertTelemetryAccess(meta, "kernel.modules.list");
+    if (payload !== undefined) {
+      this.assertPayloadObject(payload, "kernel.modules.list");
+    }
+    const modules = this.moduleLoader
+      .snapshot()
+      .map((entry) => ({ id: entry.id, state: entry.state }));
+    return { ok: true, data: { modules } };
+  }
+
+  private handleDiagnosticsTail(payload: unknown, meta: KernelCommandMeta): TailEventsResult {
+    this.assertTelemetryAccess(meta, "kernel.diagnostics.tail");
+    const limit = this.parseTailLimit(payload, "kernel.diagnostics.tail");
+    const events = this.eventBus
+      .history()
+      .filter((event) => event.name.startsWith("diagnostic:"))
+      .slice(-limit);
+    return { ok: true, data: { events } };
+  }
+
   private handleHostModulesScan(
     payload: unknown,
     meta: KernelCommandMeta
@@ -310,5 +362,36 @@ export class KernelBridge {
       }
     }
     return payload as T;
+  }
+
+  private assertTelemetryAccess(meta: KernelCommandMeta, action: string): void {
+    if (meta.source === "kernel") {
+      return;
+    }
+    if (!this.permissionSystem) {
+      throw new KernelBridgeError("KernelBridge missing PermissionSystem for telemetry access.");
+    }
+    this.permissionSystem.assert(meta.source, "telemetry.read", { action });
+  }
+
+  private parseTailLimit(payload: unknown, command: KernelCommandName): number {
+    if (payload === undefined) {
+      return 50;
+    }
+    this.assertPayloadObject(payload, command);
+    const limit = (payload as { limit?: unknown }).limit;
+    if (limit === undefined) {
+      return 50;
+    }
+    if (typeof limit !== "number" || !Number.isFinite(limit)) {
+      throw new KernelBridgeError(`${command} requires a numeric limit.`);
+    }
+    return Math.min(200, Math.max(1, Math.floor(limit)));
+  }
+
+  private assertPayloadObject(payload: unknown, command: KernelCommandName): void {
+    if (!payload || typeof payload !== "object") {
+      throw new KernelBridgeError(`${command} requires an object payload.`);
+    }
   }
 }

@@ -85,6 +85,7 @@ const bridge = new KernelBridge({
   schemaRegistry,
   snapshotter,
   host,
+  permissionSystem,
 });
 const localTransport = new LocalKernelTransport(bridge);
 const tauriTransport =

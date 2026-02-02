@@ -619,6 +619,7 @@ const bridge = new KernelBridge({
   cacheStore: bridgeCache,
   schemaRegistry: bridgeRegistry,
   snapshotter: bridgeSnapshotter,
+  permissionSystem: bridgePermissions,
 });
 const transport = new LocalKernelTransport(bridge);
 const unified = new UnifiedKernelTransport({
@@ -657,6 +658,36 @@ pendingChecks.push(
     );
   })
 );
+
+bridgeBus.emit("test:event", { ok: true }, { source: "kernel" });
+bridgeBus.emit("diagnostic:test", { ok: true }, { source: "kernel" });
+const eventsTail = bridge.dispatch(
+  "kernel.events.tail",
+  { limit: 500 },
+  { source: "kernel" }
+) as { ok: true; data: { events: Array<{ name: string }> } };
+assertTrue("events tail clamped", eventsTail.data.events.length <= 200);
+const diagnosticsTail = bridge.dispatch(
+  "kernel.diagnostics.tail",
+  { limit: 50 },
+  { source: "kernel" }
+) as { ok: true; data: { events: Array<{ name: string }> } };
+assertTrue(
+  "diagnostics tail only diagnostic",
+  diagnosticsTail.data.events.every((event) => event.name.startsWith("diagnostic:"))
+);
+assertThrows(
+  "events tail requires telemetry.read",
+  () => bridge.dispatch("kernel.events.tail", {}, { source: "module-a" }),
+  PermissionError
+);
+bridgePermissions.grant("module-a", ["telemetry.read"]);
+const telemetryTail = bridge.dispatch(
+  "kernel.events.tail",
+  { limit: 1 },
+  { source: "module-a" }
+) as { ok: true; data: { events: Array<{ name: string }> } };
+assertTrue("telemetry tail succeeds with permission", telemetryTail.data.events.length <= 1);
 
 bridgeLoader.register(dummyModule);
 bridgeLoader.start(dummyModule.name);
@@ -762,6 +793,7 @@ const discoveryBridge = new KernelBridge({
   schemaRegistry: discoveryRegistry,
   snapshotter: discoverySnapshotter,
   host: discoveryHost,
+  permissionSystem: discoveryPermissions,
 });
 const discoveryTransport = new LocalKernelTransport(discoveryBridge);
 const scanResults = (await discoveryTransport.request(
